@@ -1,0 +1,9 @@
+CompileFlags:
+  CompilationDatabase: build/Debug
+  Add:
+    - -isystem
+    - /usr/lib/arm-none-eabi/include
+
+Diagnostics:
+  Suppress:
+    - unused-includes

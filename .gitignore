@@ -1,0 +1,12 @@
+# 构建产物
+build/
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+
+# 编辑器 / IDE 本地文件
+.settings/
+.cache/
