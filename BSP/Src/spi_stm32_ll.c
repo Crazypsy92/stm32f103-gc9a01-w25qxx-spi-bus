@@ -245,9 +245,9 @@ static void dma_setup_channel(DMA_TypeDef *dma, uint32_t ch,
     LL_DMA_SetChannelPriorityLevel(dma, ch, LL_DMA_PRIORITY_HIGH);
 
     if (direction == LL_DMA_DIRECTION_MEMORY_TO_PERIPH) {
-        LL_DMA_ConfigAddresses(dma, ch, (uint32_t)mem, periph_addr, direction);
+        LL_DMA_ConfigAddresses(dma, ch, (uint32_t)(uintptr_t)mem, periph_addr, direction);
     } else {
-        LL_DMA_ConfigAddresses(dma, ch, periph_addr, (uint32_t)mem, direction);
+        LL_DMA_ConfigAddresses(dma, ch, periph_addr, (uint32_t)(uintptr_t)mem, direction);
     }
     LL_DMA_SetDataLength(dma, ch, len);
 }

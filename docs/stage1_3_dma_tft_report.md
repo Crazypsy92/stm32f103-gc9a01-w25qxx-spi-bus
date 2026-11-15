@@ -25,3 +25,11 @@
 2. DMA 每一块必须先确认 TXE/BSY 后再配置下一块；BSY 卡死不能开启第二块。
 3. 真实 STM32F103C8T6 在非破坏性模式复验：TFT 页面可读、SPI 共享互不抢占、Flash 读一致。
 4. 若 HIL 无设备接入，标记 BLOCKED，不重写旧报告为新证据。
+
+## 本轮 GitHub CI 实测
+
+- 工作流：https://github.com/Crazypsy92/stm32f103-gc9a01-w25qxx-spi-bus/actions/runs/43673129350
+- Normal Host CTest：3/3 PASS（bus、ll、flash）。
+- ASan/UBSan Host CTest：3/3 PASS；未发现运行期 sanitizer 错误。
+- 初次编译发现 Host 64 位环境指针转换为 32 位地址的警告，后续显式经 `uintptr_t` 转换；需以最终提交 CI 复验为准。
+- Host Mock 仅验证 DMA 分块控制、地址配置和超时逻辑，不提供真实 SPI 采样/逻辑分析仪波形与 TFT 实物显示结论。

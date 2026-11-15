@@ -158,7 +158,7 @@ static inline void     LL_SPI_SetTransferDirection(SPI_TypeDef *s, uint32_t p) {
 static inline void     LL_SPI_SetDataWidth(SPI_TypeDef *s, uint32_t p)         { (void)s; (void)p; }
 static inline void     LL_SPI_SetNSSMode(SPI_TypeDef *s, uint32_t p)           { (void)s; (void)p; }
 static inline void     LL_SPI_ClearFlag_OVR(SPI_TypeDef *s) { (void)s; mock_spi_sr &= ~SR_OVR; }
-static inline uint32_t LL_SPI_DMA_GetRegAddr(SPI_TypeDef *s) { return (uint32_t)&s->DR; }
+static inline uint32_t LL_SPI_DMA_GetRegAddr(SPI_TypeDef *s) { return (uint32_t)(uintptr_t)&s->DR; }
 
 /* ===== DMA ===== */
 #define LL_DMA_MODE_NORMAL            0
