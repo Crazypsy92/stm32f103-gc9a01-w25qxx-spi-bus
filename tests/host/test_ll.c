@@ -7,6 +7,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#define LARGE_DMA_LEN 70000U
+/* Host 专用静态缓冲区：避免旧版 480B 数组被当作 70000B 使用。 */
+static uint8_t s_large_tx[LARGE_DMA_LEN];
+static uint8_t s_large_rx[LARGE_DMA_LEN];
+
 static int g_fail = 0;
 #define CHECK(cond, msg) do { \
     if (!(cond)) { printf("  FAIL: %s (line %d)\n", msg, __LINE__); g_fail++; } \
@@ -95,18 +100,61 @@ int main(void)
     st = s_ll.bus.ops->transfer(&s_ll.bus, tx, rx, 16U);
     CHECK(st == (int)SPI_LL_OK, "transfer OK after recovery from timeout");
 
-    /* ---------- 4. CNDTR 16 位上限分块 ---------- */
-    printf("-- DMA chunking (70000 B) --\n");
+    /* ---------- 4. 真缓冲区验证 65535/65536/70000 B DMA 分块边界 ---------- */
+    printf("-- DMA chunking boundaries (65535/65536/70000 B) --\n");
+    for (uint32_t k = 0; k < LARGE_DMA_LEN; ++k) {
+        s_large_tx[k] = (uint8_t)(k ^ 0x5AU);
+    }
+    {
+        const uint32_t sizes[] = { 65535U, 65536U, 70000U };
+        for (uint32_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+            uint32_t n = sizes[i], parts = (n > 65535U) ? 2U : 1U;
+            setup();
+            cfg(&cfg_dma);
+            mock_dma_isr = DMA_ISR_TCIF3 | DMA_ISR_TCIF2;
+            mock_spi_sr = SR_TXE;
+            mock_bsy_checks = 0;
+            st = s_ll.bus.ops->transfer(&s_ll.bus, s_large_tx, s_large_rx, n);
+            CHECK(st == (int)SPI_LL_OK, "large full-duplex DMA returns OK");
+            CHECK(mock_cndtr_cnt[3] == parts && mock_cndtr_cnt[2] == parts, "TX/RX have correct chunk count");
+            CHECK(mock_cndtr_log[3][0] == 65535U && mock_cndtr_log[2][0] == 65535U, "first chunk is 65535");
+            if (parts == 2U) {
+                CHECK(mock_cndtr_log[3][1] == n - 65535U && mock_cndtr_log[2][1] == n - 65535U,
+                      "second chunk is exact remainder");
+                CHECK(mock_cmar_log[3][1] == (uint32_t)(uintptr_t)(s_large_tx + 65535U) &&
+                      mock_cmar_log[2][1] == (uint32_t)(uintptr_t)(s_large_rx + 65535U),
+                      "second TX/RX chunk memory address starts at offset 65535");
+            }
+            CHECK(mock_cmar_log[3][0] == (uint32_t)(uintptr_t)s_large_tx &&
+                  mock_cmar_log[2][0] == (uint32_t)(uintptr_t)s_large_rx,
+                  "first TX/RX DMA addresses match valid buffers");
+            CHECK(mock_bsy_checks >= parts, "BSY checked after every DMA chunk");
+            CHECK(mock_dma_en[2] == 0 && mock_dma_en[3] == 0, "DMA channels disabled after transfer");
+        }
+    }
+
+    /* 发送屏幕像素时 TX-only DMA 的分块也要正确完成。 */
+    printf("-- DMA TX-only 70000 B --\n");
     setup();
     cfg(&cfg_dma);
-    mock_dma_isr = DMA_ISR_TCIF3 | DMA_ISR_TCIF2;
-    mock_spi_sr  = SR_TXE;
-    mock_dwt_step = 0;
-    st = s_ll.bus.ops->transfer(&s_ll.bus, tx, rx, 70000U);
-    CHECK(st == (int)SPI_LL_OK, "70000B DMA returns OK");
-    CHECK(mock_cndtr_cnt[3] >= 2, "split into >=2 chunks");
-    CHECK(mock_cndtr_log[3][0] == 65535U, "first chunk = 65535");
-    CHECK(mock_cndtr_log[3][1] == (70000U - 65535U), "second chunk = remainder");
+    mock_dma_isr = DMA_ISR_TCIF3;
+    mock_spi_sr = SR_TXE;
+    mock_bsy_checks = 0;
+    st = s_ll.bus.ops->transfer(&s_ll.bus, s_large_tx, NULL, LARGE_DMA_LEN);
+    CHECK(st == (int)SPI_LL_OK, "70000B TX-only returns OK");
+    CHECK(mock_cndtr_cnt[3] == 2 && mock_cndtr_cnt[2] == 0, "TX-only uses no RX DMA channel");
+    CHECK(mock_bsy_checks >= 2, "TX-only checks BSY at each chunk boundary");
+
+    /* BSY 卡死时不得进入第二个分块，且必须有界超时。 */
+    printf("-- DMA stuck BSY prevents next chunk --\n");
+    setup();
+    cfg(&cfg_dma);
+    mock_dma_isr = DMA_ISR_TCIF3;
+    mock_spi_sr = SR_TXE | SR_BSY;
+    mock_dwt_step = 200000U;
+    st = s_ll.bus.ops->transfer(&s_ll.bus, s_large_tx, NULL, LARGE_DMA_LEN);
+    CHECK(st == (int)SPI_LL_ERROR_TIMEOUT, "BSY stuck returns bounded timeout");
+    CHECK(mock_cndtr_cnt[3] == 1, "no second DMA chunk starts while SPI busy");
 
     /* ---------- 5. 轮询正常 ---------- */
     printf("-- Polling normal --\n");

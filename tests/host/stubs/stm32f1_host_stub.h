@@ -73,6 +73,9 @@ extern volatile uint32_t mock_dma_isr;      /* DMA ISR 镜像 */
 extern volatile uint8_t  mock_dma_en[8];    /* 通道是否使能 */
 extern volatile uint32_t mock_cndtr_log[8][64];
 extern volatile uint32_t mock_cndtr_cnt[8];
+extern volatile uint32_t mock_cmar_log[8][64]; /* 每块的 DMA 内存地址（Host 指针低 32 位） */
+extern volatile uint32_t mock_cmar_cnt[8];
+extern volatile uint32_t mock_bsy_checks;      /* LL SPI BSY 检查次数，用于逐块时序验收 */
 extern volatile uint32_t mock_configure_calls; /* ll_configure 被调用次数 */
 
 #define SR_BSY   (1U << 7)
@@ -135,7 +138,7 @@ static inline void LL_GPIO_Init(GPIO_TypeDef *p, LL_GPIO_InitTypeDef *g) { (void
 #define LL_SPI_DATAWIDTH_8BIT 0
 #define LL_SPI_NSS_SOFT       0
 
-static inline uint32_t LL_SPI_IsActiveFlag_BSY(SPI_TypeDef *s)  { (void)s; mock_tick(); return (mock_spi_sr & SR_BSY)  ? 1 : 0; }
+static inline uint32_t LL_SPI_IsActiveFlag_BSY(SPI_TypeDef *s)  { (void)s; mock_bsy_checks++; mock_tick(); return (mock_spi_sr & SR_BSY)  ? 1 : 0; }
 static inline uint32_t LL_SPI_IsActiveFlag_TXE(SPI_TypeDef *s)  { (void)s; mock_tick(); return (mock_spi_sr & SR_TXE)  ? 1 : 0; }
 static inline uint32_t LL_SPI_IsActiveFlag_RXNE(SPI_TypeDef *s) { (void)s; mock_tick(); return (mock_spi_sr & SR_RXNE) ? 1 : 0; }
 static inline uint32_t LL_SPI_IsActiveFlag_OVR(SPI_TypeDef *s)  { (void)s; mock_tick(); return (mock_spi_sr & SR_OVR)  ? 1 : 0; }
@@ -186,6 +189,9 @@ static inline void LL_DMA_ConfigAddresses(DMA_TypeDef *d, uint32_t ch, uint32_t 
     } else {
         mock_dma_ch[ch].CPAR = src;   /* Src = periph */
         mock_dma_ch[ch].CMAR = dst;   /* Dst = memory */
+    }
+    if (mock_cmar_cnt[ch] < 64U) {
+        mock_cmar_log[ch][mock_cmar_cnt[ch]++] = mock_dma_ch[ch].CMAR;
     }
 }
 static inline void LL_DMA_SetDataLength(DMA_TypeDef *d, uint32_t ch, uint32_t len) {

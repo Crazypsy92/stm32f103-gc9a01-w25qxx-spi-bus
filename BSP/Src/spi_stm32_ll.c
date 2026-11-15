@@ -362,30 +362,37 @@ static spi_ll_status_t ll_transfer_dma(spi_stm32_ll_t *ll,
             goto cleanup;
         }
 
+        /* CNDTR/TCIF 仅代表 DMA 已搬完数据，不代表 SPI 最后一位已离开 SCK。
+           必须逐块等 TXE 和 BSY，尤其避免下一块 DMA 覆盖尚在发送的尾字节。 */
+        {
+            uint32_t start = ll_dwt_cycles();
+            while (!LL_SPI_IsActiveFlag_TXE(spi)) {
+                if (ll_timeout_expired(start, SPI_BYTE_TIMEOUT_CYCLES)) {
+                    status = SPI_LL_ERROR_TIMEOUT;
+                    goto cleanup;
+                }
+            }
+            start = ll_dwt_cycles();
+            while (LL_SPI_IsActiveFlag_BSY(spi)) {
+                if (ll_timeout_expired(start, SPI_BSY_TIMEOUT_CYCLES)) {
+                    status = SPI_LL_ERROR_TIMEOUT;
+                    goto cleanup;
+                }
+            }
+        }
+
+        /* SPI 已空闲，此时才能关闭当前 DMA 请求和通道、进入下一块。
+           设备 CS 属于 Port 层，整个分块循环期间始终保持低电平。 */
+        LL_SPI_DisableDMAReq_TX(spi);
+        LL_SPI_DisableDMAReq_RX(spi);
+        LL_DMA_DisableChannel(dma, txc);
+        LL_DMA_DisableChannel(dma, rxc);
+        dma_clear_flags(dma, txc);
+        dma_clear_flags(dma, rxc);
+        if (rx == NULL) {
+            spi_drain_rx_and_clear_ovr(spi);
+        }
         offset += chunk;
-    }
-
-    /* 等最后一个字节真正移出移位寄存器，才能释放片选 */
-    {
-        uint32_t start = ll_dwt_cycles();
-        while (!LL_SPI_IsActiveFlag_TXE(spi)) {
-            if (ll_timeout_expired(start, SPI_BYTE_TIMEOUT_CYCLES)) {
-                status = SPI_LL_ERROR_TIMEOUT;
-                goto cleanup;
-            }
-        }
-        start = ll_dwt_cycles();
-        while (LL_SPI_IsActiveFlag_BSY(spi)) {
-            if (ll_timeout_expired(start, SPI_BSY_TIMEOUT_CYCLES)) {
-                status = SPI_LL_ERROR_TIMEOUT;
-                goto cleanup;
-            }
-        }
-    }
-
-    /* TX-only 也要读 DR 清掉全双工产生的接收数据与 OVR */
-    if (rx == NULL) {
-        spi_drain_rx_and_clear_ovr(spi);
     }
 
 cleanup:

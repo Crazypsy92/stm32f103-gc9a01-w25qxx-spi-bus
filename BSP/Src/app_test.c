@@ -60,37 +60,18 @@ volatile app_test_result_t g_app_test_result;
  */
 void AppTFT_Test(void)
 {
-    uint16_t bars[6] = { RED, GREEN, BLUE, YELLOW, MAGENTA, CYAN };
-    uint8_t i;
-
-    /* 1. 纯色刷屏（验证各基色与显存连续写） */
-    LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, RED);
-    Delay_ms(300);
-    LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, GREEN);
-    Delay_ms(300);
-    LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, BLUE);
-    Delay_ms(300);
+    /* 圆形屏引导页：不占用额外帧缓冲，RGB 色块同时检验颜色通路。 */
     LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, BLACK);
-
-    /* 2. 顶部 6 条色带 */
-    for (i = 0; i < 6; i++)
-    {
-        LCD_Fill(&g_lcd, i * 40, 0, (i + 1) * 40, 40, bars[i]);
-    }
-
-    /* 3. 文字信息（不同字号） */
-    LCD_ShowString(&g_lcd, 20, 60, "GC9A01 OK", WHITE, BLACK, 24, 0);
-    LCD_ShowString(&g_lcd, 20, 100, "240x240 SPI1", CYAN, BLACK, 16, 0);
-    LCD_ShowString(&g_lcd, 20, 120, "CS:PA9 RST:PA10", YELLOW, BLACK, 16, 0);
-    LCD_ShowString(&g_lcd, 20, 140, "DC:PB13", GREEN, BLACK, 16, 0);
-    LCD_ShowIntNum(&g_lcd, 20, 170, 2026, 4, LGRAY, BLACK, 16);
-
-    /* 4. 边框与圆 */
-    LCD_DrawRectangle(&g_lcd, 2, 2, 237, 237, WHITE);
-    Draw_Circle(&g_lcd, 120, 205, 18, MAGENTA);
-
-    /* 5. 清空心跳区 */
-    LCD_Fill(&g_lcd, 108, 222, 132, 234, BLACK);
+    Draw_Circle(&g_lcd, 120, 120, 113, DARKBLUE);
+    LCD_ShowString(&g_lcd, 68, 34, "SPI1 LAB", CYAN, BLACK, 24, 0);
+    LCD_ShowString(&g_lcd, 60, 84, "STM32F103C8", WHITE, BLACK, 16, 0);
+    LCD_ShowString(&g_lcd, 52, 109, "GC9A01 W25Q128", LGRAY, BLACK, 16, 0);
+    LCD_ShowString(&g_lcd, 70, 136, "DMA + FLASH", WHITE, BLACK, 16, 0);
+    LCD_Fill(&g_lcd, 75, 166, 105, 173, RED);
+    LCD_Fill(&g_lcd, 105, 166, 135, 173, GREEN);
+    LCD_Fill(&g_lcd, 135, 166, 165, 173, BLUE);
+    LCD_ShowString(&g_lcd, 80, 187, "SELF TEST", GREEN, BLACK, 16, 0);
+    Delay_ms(350);
 }
 
 /**
@@ -668,46 +649,36 @@ void AppBusTest(void)
     g_app_test_result.reference_valid       = reference_valid;
     g_app_test_result.expected_256_valid    = expected_256_valid;
 
-    LCD_ShowString(&g_lcd, 12, 12, "BUS RELIABILITY TEST", CYAN, BLACK, 16, 0);
+    /* 240x240 圆屏摘要：关键指标放中心，避免文字被四角遮挡。 */
+    LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, BLACK);
+    Draw_Circle(&g_lcd, 120, 120, 113, DARKBLUE);
+    LCD_ShowString(&g_lcd, 72, 22, "SPI1 HEALTH", CYAN, BLACK, 16, 0);
+    LCD_ShowString(&g_lcd, 68, 48, "W25Q128 16M", LGRAY, BLACK, 16, 0);
 
-    snprintf(line, sizeof(line), "CT:%u/%u G:%lu E:%05X",
+    snprintf(line, sizeof(line), "CT:%u/%u IRQ:%s",
              (unsigned)ct_pass, (unsigned)ct_total,
-             (unsigned long)probe.granted, (unsigned)s_ct_fail);
-    LCD_ShowString(&g_lcd, 12, 34, line, WHITE, BLACK, 16, 0);
+             (probe.granted == 0U) ? "OK" : "ERR");
+    LCD_ShowString(&g_lcd, 52, 72, line, WHITE, BLACK, 16, 0);
 
-    snprintf(line, sizeof(line), "IRQ:%lu HIT:%lu",
-             (unsigned long)probe.probes, (unsigned long)probe.saw_busy);
-    LCD_ShowString(&g_lcd, 12, 56, line, WHITE, BLACK, 16, 0);
+    snprintf(line, sizeof(line), "LEN:%u/%u", (unsigned)len_ok, (unsigned)len_count);
+    LCD_ShowString(&g_lcd, 72, 94, line, WHITE, BLACK, 16, 0);
 
-    snprintf(line, sizeof(line), "LEN:%u/%u STR:%lu/%lu",
-             (unsigned)len_ok, (unsigned)len_count,
-             (unsigned long)data_match_ok, (unsigned long)STRESS_TXN);
-    LCD_ShowString(&g_lcd, 12, 80, line, WHITE, BLACK, 16, 0);
+    snprintf(line, sizeof(line), "RD:%lu/%lu", (unsigned long)read_ok, (unsigned long)STRESS_TXN);
+    LCD_ShowString(&g_lcd, 64, 114, line, WHITE, BLACK, 16, 0);
+
+    snprintf(line, sizeof(line), "EQ:%lu/%lu", (unsigned long)data_match_ok, (unsigned long)STRESS_TXN);
+    LCD_ShowString(&g_lcd, 64, 134, line, WHITE, BLACK, 16, 0);
+
+    snprintf(line, sizeof(line), "REC:%s REF:%s",
+             rec_ok ? "OK" : "ERR", (reference_valid == 0x03U) ? "OK" : "ERR");
+    LCD_ShowString(&g_lcd, 64, 154, line, (rec_ok && reference_valid == 0x03U) ? GREEN : RED, BLACK, 16, 0);
 
 #if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
-    snprintf(line, sizeof(line), "FL:%u/%u EC:%lu",
-             (unsigned)fl_ok, (unsigned)FLASH_ROUNDS, (unsigned long)erase_count);
+    snprintf(line, sizeof(line), "ERASE:%lu TEST", (unsigned long)erase_count);
 #else
-    snprintf(line, sizeof(line), "MODE:SAFE (ERASE:0)");
+    snprintf(line, sizeof(line), "SAFE ERASE:0");
 #endif
-    LCD_ShowString(&g_lcd, 12, 104, line, WHITE, BLACK, 16, 0);
-
-    snprintf(line, sizeof(line), "REC:%s ID:%s REF:%s",
-             rec_ok ? "OK" : "FAIL", id_match ? "OK" : "FAIL",
-             (reference_valid == 0x03U) ? "OK" : "ERR");
-    LCD_ShowString(&g_lcd, 12, 128, line,
-                   (rec_ok && id_match && (reference_valid == 0x03U)) ? GREEN : RED,
-                   BLACK, 16, 0);
-
-    snprintf(line, sizeof(line), "OWNER:%s DEPTH:%u",
-             (owner_after == NULL) ? "NULL" : "LEFT", (unsigned)depth_after);
-    LCD_ShowString(&g_lcd, 12, 152, line,
-                   (owner_after == NULL && depth_after == 0U) ? WHITE : RED,
-                   BLACK, 16, 0);
-
-    snprintf(line, sizeof(line), "%s %lums", pass ? "PASS" : "FAIL",
-             (unsigned long)elapsed);
-    LCD_ShowString(&g_lcd, 12, 176, line, pass ? GREEN : RED, BLACK, 16, 0);
-
-    LCD_DrawRectangle(&g_lcd, 2, 2, 237, 237, WHITE);
+    LCD_ShowString(&g_lcd, 68, 178, line, YELLOW, BLACK, 16, 0);
+    LCD_ShowString(&g_lcd, 96, 199, pass ? "PASS" : "FAIL",
+                   pass ? GREEN : RED, BLACK, 24, 0);
 }

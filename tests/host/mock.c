@@ -20,6 +20,9 @@ volatile uint32_t mock_dma_isr = 0;
 volatile uint8_t  mock_dma_en[8] = {0};
 volatile uint32_t mock_cndtr_log[8][64];
 volatile uint32_t mock_cndtr_cnt[8] = {0};
+volatile uint32_t mock_cmar_log[8][64] = {{0}};
+volatile uint32_t mock_cmar_cnt[8] = {0};
+volatile uint32_t mock_bsy_checks = 0;
 volatile uint32_t mock_configure_calls = 0;
 
 /* CYCCNT 读取：每次推进一个步长（模拟时间流逝） */
@@ -60,5 +63,8 @@ void mock_reset(void)
     memset((void*)mock_dma_en, 0, sizeof(mock_dma_en));
     memset((void*)mock_cndtr_cnt, 0, sizeof(mock_cndtr_cnt));
     memset((void*)mock_cndtr_log, 0, sizeof(mock_cndtr_log));
+    memset((void*)mock_cmar_cnt, 0, sizeof(mock_cmar_cnt));
+    memset((void*)mock_cmar_log, 0, sizeof(mock_cmar_log));
+    mock_bsy_checks = 0;
     mock_configure_calls = 0;
 }
