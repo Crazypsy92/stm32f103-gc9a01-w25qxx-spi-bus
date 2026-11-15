@@ -13,7 +13,9 @@
 
 /* 按键对象 */
 static Button KEY1;
+#if !defined(CONFIG_DUAL_SPI) || (CONFIG_DUAL_SPI == 0)
 static Button KEY2;
+#endif
 
 /* 本轮待处理的单击事件标志：bit1 对应 KEY_ID_1，bit2 对应 KEY_ID_2 */
 #define KEY_PENDING_BIT(id)     ((uint8_t)(1U << (id)))
@@ -41,7 +43,12 @@ static void KEY_GPIO_Init(void)
     LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_GPIOB);
     LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_GPIOC);
 
+#if defined(CONFIG_DUAL_SPI) && (CONFIG_DUAL_SPI != 0)
+    /* 双 SPI 模式下 PB14 被用作 SPI2_MISO，仅初始化 KEY1 (PB12)，避免按键上拉污染总线 */
+    GPIO_InitStruct.Pin  = key1_Pin;
+#else
     GPIO_InitStruct.Pin  = key1_Pin | key2_Pin;
+#endif
     GPIO_InitStruct.Mode = LL_GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
     LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
@@ -161,14 +168,14 @@ void KEY_Init(void)
 
     /* 初始化 multi_button 对象：handle, 读引脚函数, 有效电平(0=低), ID */
     button_init(&KEY1, Read_Pin_Level, 0, KEY_ID_1);
-    button_init(&KEY2, Read_Pin_Level, 0, KEY_ID_2);
-
-    /* 绑定需要向上层传递的事件：单击、长按开始 */
     button_attach(&KEY1, BTN_SINGLE_CLICK,     Key_Common_Callback);
     button_attach(&KEY1, BTN_LONG_PRESS_START, Key_Common_Callback);
+    button_start(&KEY1);
+
+#if !defined(CONFIG_DUAL_SPI) || (CONFIG_DUAL_SPI == 0)
+    button_init(&KEY2, Read_Pin_Level, 0, KEY_ID_2);
     button_attach(&KEY2, BTN_SINGLE_CLICK,     Key_Common_Callback);
     button_attach(&KEY2, BTN_LONG_PRESS_START, Key_Common_Callback);
-
-    button_start(&KEY1);
     button_start(&KEY2);
+#endif
 }

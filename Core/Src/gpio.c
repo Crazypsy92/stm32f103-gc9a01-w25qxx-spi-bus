@@ -61,7 +61,12 @@ void MX_GPIO_Init(void)
   LL_GPIO_Init(led_GPIO_Port, &GPIO_InitStruct);
 
   /**/
+#if defined(CONFIG_DUAL_SPI) && (CONFIG_DUAL_SPI != 0)
+  /* 双 SPI 模式：PB14 充当 SPI2_MISO，禁用 key2 (PB14) 输入上拉，防止总线冲突 */
+  GPIO_InitStruct.Pin = key1_Pin;
+#else
   GPIO_InitStruct.Pin = key1_Pin|key2_Pin;
+#endif
   GPIO_InitStruct.Mode = LL_GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
   LL_GPIO_Init(GPIOB, &GPIO_InitStruct);

@@ -1,0 +1,105 @@
+Open On-Chip Debugger 0.12.0
+Licensed under GNU GPL v2
+For bug reports, read
+	http://openocd.org/doc/doxygen/bugs.html
+Info : auto-selecting first available session transport "hla_swd". To override use 'transport select <transport>'.
+Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD
+none separate
+
+warning: No executable has been specified and target does not support
+determining executable automatically.  Try using the "file" command.
+0x08007386 in ?? ()
+$1 = {
+  magic = 1145651527,
+  dual_spi_mode = 1,
+  tft_only_mode = 0,
+  tft_dc_pin = 4,
+  tft_dc_port_id = 0,
+  tft_bus_id = 1,
+  flash_bus_id = 2,
+  tft_speed_hz = 18000000,
+  tft_use_dma = 1
+}
+$2 = LCD_OK
+$3 = {
+  bus = 0x200004e8 <s_flash_contexts+24>,
+  id = 61207,
+  capacity = 16777216,
+  last_result = W25QXX_OK
+}
+$4 = {
+  magic = 1146437964,
+  rounds_ok = 20,
+  rounds_total = 20,
+  id_ok_count = 20,
+  dma256_ok_count = 20,
+  dma480_ok_count = 20,
+  tft_update_count = 20,
+  post_read_ok = 20,
+  owner_null = 1,
+  depth_zero = 1,
+  pass = 1,
+  elapsed_ms = 54
+}
+$5 = {
+  magic = 1414743380,
+  ct_pass = 18,
+  ct_total = 18,
+  ct_fail = 0,
+  rounds_ok = 10,
+  rounds_total = 10,
+  len_ok = 10,
+  len_count = 10,
+  str_ok = 1000,
+  str_total = 1000,
+  fl_ok = 0,
+  fl_total = 0,
+  fl_last_result = 0,
+  fl_fail_round = 0,
+  erase_count = 0,
+  rec_ok = 1,
+  ll_recover_count = 1,
+  ll_last_error = 0,
+  owner_null = 1,
+  depth_zero = 1,
+  pass = 1,
+  elapsed_ms = 114,
+  test_mode = 0,
+  test_sector_addr = 1048576,
+  rounds_fail_stage = 0,
+  rounds_fail_tx0 = 0,
+  rounds_fail_rx0 = 0,
+  read_ok = 1000,
+  data_match_ok = 1000,
+  data_mismatch = 0,
+  first_mismatch_offset = 4294967295,
+  last_flash_error = 0,
+  reference_valid = 3,
+  expected_256_valid = 1
+}
+Note: automatically using hardware breakpoints for read-only addresses.
+$6 = {
+  ops = 0x8008894 <s_stm32_ll_ops>,
+  ctx = 0x200001cc <s_spi_instances>,
+  owner = 0x0,
+  depth = 0,
+  rejects = 260,
+  current_cfg = {
+    clock_hz = 18000000,
+    mode = SPI_BUS_MODE_0,
+    use_dma = 1 '\001'
+  }
+}
+$7 = {
+  ops = 0x8008894 <s_stm32_ll_ops>,
+  ctx = 0x20000200 <s_spi_instances+52>,
+  owner = 0x0,
+  depth = 0,
+  rejects = 0,
+  current_cfg = {
+    clock_hz = 9000000,
+    mode = SPI_BUS_MODE_0,
+    use_dma = 1 '\001'
+  }
+}
+[Inferior 1 (Remote target) detached]

@@ -1,0 +1,55 @@
+=== DUAL SPI 3-CYCLE REBOOT VERIFICATION ===
+--- Cycle 1 Start ---
+Open On-Chip Debugger 0.12.0
+Licensed under GNU GPL v2
+For bug reports, read
+	http://openocd.org/doc/doxygen/bugs.html
+Info : auto-selecting first available session transport "hla_swd". To override use 'transport select <transport>'.
+Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD
+none separate
+
+warning: No executable has been specified and target does not support
+determining executable automatically.  Try using the "file" command.
+0x080017a8 in ?? ()
+$1 = 1
+$2 = 1
+$3 = 61207
+$4 = 20
+[Inferior 1 (Remote target) detached]
+--- Cycle 1 End ---
+--- Cycle 2 Start ---
+Open On-Chip Debugger 0.12.0
+Licensed under GNU GPL v2
+For bug reports, read
+	http://openocd.org/doc/doxygen/bugs.html
+Info : auto-selecting first available session transport "hla_swd". To override use 'transport select <transport>'.
+Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD
+none separate
+
+warning: No executable has been specified and target does not support
+determining executable automatically.  Try using the "file" command.
+0x08007344 in ?? ()
+$1 = 1
+$2 = 1
+$3 = 61207
+$4 = 20
+[Inferior 1 (Remote target) detached]
+--- Cycle 2 End ---
+--- Cycle 3 Start ---
+Open On-Chip Debugger 0.12.0
+Licensed under GNU GPL v2
+For bug reports, read
+	http://openocd.org/doc/doxygen/bugs.html
+Info : auto-selecting first available session transport "hla_swd". To override use 'transport select <transport>'.
+Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD
+none separate
+
+warning: No executable has been specified and target does not support
+determining executable automatically.  Try using the "file" command.
+0x08007388 in ?? ()
+$1 = 1
+$2 = 1
+$3 = 61207
+$4 = 20
+[Inferior 1 (Remote target) detached]
+--- Cycle 3 End ---

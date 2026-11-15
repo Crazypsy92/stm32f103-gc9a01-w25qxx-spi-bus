@@ -40,4 +40,9 @@ W25QXX_Result W25QXX_PortInitWithConfig(W25QXX_Device *dev, const W25QXX_PortCon
  */
 void W25QXX_PortInit(void);
 
+/**
+ * @brief 重置 W25QXX 端口层所有静态槽位（主要供单元测试复位环境使用）
+ */
+void W25QXX_Port_ResetSlots(void);
+
 #endif /* __W25QXX_PORT_H__ */

@@ -296,8 +296,8 @@ static spi_ll_status_t spi_recover(spi_stm32_ll_t *ll)
         }
     }
 
-    /* 5. 强制按当前配置重配一次，确保寄存器处于已知状态 */
-    {
+    /* 5. 强制按当前配置重配一次，确保寄存器处于已知状态（若尚未配置则维持初始化默认） */
+    if (ll->current.clock_hz > 0U) {
         spi_bus_config_t saved = ll->current;
         ll->configured = 0U;                 /* 强制走完整初始化分支 */
         if (ll_configure(&ll->bus, &saved) != (int)SPI_LL_OK) {

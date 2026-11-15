@@ -6,7 +6,9 @@
  */
 #include "bsp_spi.h"
 #include "spi_stm32_ll.h"
+#include "gc9a01_port.h"
 #include "main.h"
+#include <string.h>
 
 /* ================================================================================== */
 /* 板级配置（按实际硬件修改）                                         */
@@ -85,12 +87,26 @@ static uint8_t s_spi_inited[BSP_SPI_BUS_MAX] = {0U, 0U};
 /* 对外接口                                                           */
 /* ================================================================================== */
 
+uint8_t BSP_SPI_IsBusActive(bsp_spi_id_t id)
+{
+    if ((uint32_t)id >= (uint32_t)BSP_SPI_BUS_MAX) {
+        return 0U;
+    }
+    return s_spi_inited[id];
+}
+
 spi_bus_t *BSP_SPI_GetBus(bsp_spi_id_t id)
 {
     if ((uint32_t)id >= (uint32_t)BSP_SPI_BUS_MAX) {
         return NULL;
     }
     if (!s_spi_inited[id]) {
+        if (id == BSP_SPI_BUS_2) {
+            /* 检查引脚冲突：若 TFT DC 正占用 PB13，拒绝启用 SPI2 */
+            if (GC9A01_Port_IsPinUsed(GPIOB, LL_GPIO_PIN_13)) {
+                return NULL;
+            }
+        }
         const spi_stm32_ll_hw_t *hw = (id == BSP_SPI_BUS_1) ? &s_spi1_hw : &s_spi2_hw;
         spi_stm32_ll_init(&s_spi_instances[id], hw);
         s_spi_inited[id] = 1U;
@@ -110,16 +126,31 @@ spi_bus_t *BSP_SPI2_GetBus(void)
 
 int BSP_SPI_RecoverBus(spi_bus_t *bus)
 {
-    if (bus == NULL || bus->ctx == NULL) {
+    if (bus == NULL) {
         return -1;
     }
-    return spi_stm32_ll_recover((spi_stm32_ll_t *)bus->ctx);
+    /* 仅接受板级实际注册并已初始化的合法 SPI 总线句柄，非法外来指针安全拒绝 */
+    for (uint32_t i = 0; i < BSP_SPI_BUS_MAX; i++) {
+        if (s_spi_inited[i] && bus == spi_stm32_ll_bus(&s_spi_instances[i])) {
+            return spi_stm32_ll_recover(&s_spi_instances[i]);
+        }
+    }
+    return -1;
+}
+
+void BSP_SPI_ResetBuses(void)
+{
+    for (uint32_t i = 0; i < BSP_SPI_BUS_MAX; i++) {
+        s_spi_inited[i] = 0U;
+        memset(&s_spi_instances[i], 0, sizeof(s_spi_instances[i]));
+    }
 }
 
 /* ================================================================================== */
 /* 中断抢占探针（测试用，可整体删除）                                   */
 /* ================================================================================== */
 
+#if !defined(HOST_TEST)
 /* APB1 分频不为 1 时定时器时钟 = PCLK1 x 2 = 72MHz */
 #define BSP_PROBE_TIM_CLK_HZ 72000000U
 
@@ -218,6 +249,7 @@ void TIM2_IRQHandler(void)
         (void)spi_bus_release(s_probe_bus, &s_probe_owner);
     }
 }
+#endif /* !HOST_TEST */
 
 int BSP_SPI1_Recover(void)
 {

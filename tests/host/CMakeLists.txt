@@ -29,9 +29,16 @@ add_executable(test_gc9a01 test_gc9a01.c
 target_compile_definitions(test_gc9a01 PRIVATE HOST_TEST=1)
 target_include_directories(test_gc9a01 PRIVATE ${STUB_DIR} ${BSP_INC})
 
-# ---- SPI 多实例与设备配置注入测试 (Stage 2.2-A) ----
-add_executable(test_spi_multi_instance test_spi_multi_instance.c)
-target_include_directories(test_spi_multi_instance PRIVATE ${BSP_INC})
+# ---- SPI 多实例与设备配置注入测试 (Stage 2.2-A / Stage 2.2-A-HIL) ----
+add_executable(test_spi_multi_instance test_spi_multi_instance.c mock.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../BSP/Src/spi_stm32_ll.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../BSP/Src/bsp_spi.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../BSP/Src/gc9a01_port.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../BSP/Src/gc9a01.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../BSP/Src/w25qxx_port.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../BSP/Src/w25qxx.c)
+target_compile_definitions(test_spi_multi_instance PRIVATE HOST_TEST=1)
+target_include_directories(test_spi_multi_instance PRIVATE ${STUB_DIR} ${BSP_INC})
 
 enable_testing()
 add_test(NAME bus                COMMAND test_bus)

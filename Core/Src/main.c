@@ -105,10 +105,32 @@ int main(void)
   /* 1. 统一时间基准：SysTick 1ms 心跳 + DWT 微秒计时 */
   Timebase_Init();
 
-  /* 2. GC9A01 TFT 初始化：SPI1（SCK=PA5/MOSI=PA7）、CS=PA9、RES=PA10、DC=PB13 */
+#if defined(CONFIG_TFT_ONLY) && (CONFIG_TFT_ONLY != 0)
+  /* TFT_ONLY 硬件最小诊断模式：
+   * 仅初始化 SPI1 和 GC9A01，不运行 Flash 测试、TIM2 压力测试和复杂 UI。
+   * 初始使用 1.125 MHz 轮询模式，依次填充黑、红、绿、蓝、白 5 种纯色。
+   */
+  AppTFT_DiagRun(1125000U, 0U);
+
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+    AppTFT_DiagLoop();
+  }
+  /* USER CODE END 3 */
+#else
+  AppTFT_DiagInit();
+
+  /* 2. GC9A01 TFT 初始化：SPI1（SCK=PA5/MOSI=PA7）、CS=PA9、RES=PA10、DC=(PB13或PA4) */
   g_tft_init_result = GC9A01_PortInit();
 
-  /* 3. W25QXX 初始化：与 TFT 共享 SPI1，CS=PA8，速率 9MHz */
+  /* 3. W25QXX 初始化：与 TFT 共享 SPI1 或独占 SPI2，CS=PA8，速率 9MHz */
   W25QXX_PortInit();
 
   /* 4. TFT 上电显示自测（仅在 TFT 初始化成功时执行） */
@@ -134,6 +156,7 @@ int main(void)
     AppTFT_Task();   /* 心跳方块闪烁，证明主循环与刷屏链路正常 */
   }
   /* USER CODE END 3 */
+#endif
 }
 
 /**

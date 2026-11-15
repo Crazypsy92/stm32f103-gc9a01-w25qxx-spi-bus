@@ -4,6 +4,10 @@
  *        验证 Bus A / Bus B 独立状态机、设备配置注入、故障隔离与总线仲裁。
  */
 #include "spi_bus.h"
+#include "bsp_spi.h"
+#include "gc9a01_port.h"
+#include "w25qxx_port.h"
+#include "stm32f1_host_stub.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -451,6 +455,216 @@ static void test_M08_full_lifecycle_and_nested_release(void)
 }
 
 /* ================================================================================== */
+/* M09: BSP_SPI_RecoverBus 严格合法句柄校验                                            */
+/* ================================================================================== */
+static void test_M09_recover_bus_handle_validation(void)
+{
+    printf("\n[Test M09] BSP_SPI_RecoverBus Handle Validation\n");
+
+    BSP_SPI_ResetBuses();
+    mock_reset();
+
+    /* 1. NULL 指针安全拒绝 */
+    CHECK(BSP_SPI_RecoverBus(NULL) == -1, "Recover with NULL returns -1");
+
+    /* 2. 未注册的伪造/外来总线指针安全拒绝 */
+    spi_bus_t fake_bus;
+    memset(&fake_bus, 0, sizeof(fake_bus));
+    fake_bus.ctx = (void*)0x12345678;
+    CHECK(BSP_SPI_RecoverBus(&fake_bus) == -1, "Recover with foreign/unregistered bus returns -1");
+
+    /* 3. 在总线尚未被 BSP_SPI_GetBus 初始化前，未注册激活的总线句柄拒绝恢复 */
+    CHECK(BSP_SPI_IsBusActive(BSP_SPI_BUS_1) == 0, "SPI1 initially not active");
+    CHECK(BSP_SPI_IsBusActive(BSP_SPI_BUS_2) == 0, "SPI2 initially not active");
+
+    /* 4. 获取 SPI1 后，合法 SPI1 总线恢复成功 */
+    spi_bus_t *bus1 = BSP_SPI1_GetBus();
+    CHECK(bus1 != NULL, "BSP_SPI1_GetBus returns non-NULL");
+    CHECK(BSP_SPI_IsBusActive(BSP_SPI_BUS_1) == 1, "SPI1 is active");
+    CHECK(BSP_SPI_RecoverBus(bus1) == 0, "Recover registered SPI1 bus returns 0");
+
+    /* 5. 获取 SPI2 后，合法 SPI2 总线恢复成功 */
+    spi_bus_t *bus2 = BSP_SPI2_GetBus();
+    CHECK(bus2 != NULL, "BSP_SPI2_GetBus returns non-NULL");
+    CHECK(BSP_SPI_IsBusActive(BSP_SPI_BUS_2) == 1, "SPI2 is active");
+    CHECK(BSP_SPI_RecoverBus(bus2) == 0, "Recover registered SPI2 bus returns 0");
+
+    /* 6. 再次传入未注册指针仍被拒绝 */
+    CHECK(BSP_SPI_RecoverBus(&fake_bus) == -1, "Foreign bus still safely rejected");
+}
+
+/* ================================================================================== */
+/* M10: GC9A01 静态槽位用尽保护与设备复用                                              */
+/* ================================================================================== */
+static void test_M10_gc9a01_slot_exhaustion_and_reuse(void)
+{
+    printf("\n[Test M10] GC9A01 Slot Exhaustion and Reuse\n");
+
+    BSP_SPI_ResetBuses();
+    GC9A01_Port_ResetSlots();
+    mock_reset();
+
+    spi_bus_t *bus1 = BSP_SPI1_GetBus();
+    GC9A01_PortConfig cfg1 = {
+        .bus          = bus1,
+        .spi_clock_hz = 18000000U,
+        .spi_mode     = SPI_BUS_MODE_0,
+        .use_dma      = 1,
+        .cs_port      = GPIOA,
+        .cs_pin       = LL_GPIO_PIN_9,
+        .rst_port     = GPIOA,
+        .rst_pin      = LL_GPIO_PIN_10,
+        .dc_port      = GPIOA,
+        .dc_pin       = LL_GPIO_PIN_4,
+    };
+
+    LCD_Device dev1, dev2, dev3;
+    memset(&dev1, 0, sizeof(dev1));
+    memset(&dev2, 0, sizeof(dev2));
+    memset(&dev3, 0, sizeof(dev3));
+
+    /* 1. 初始化第 1 个设备 -> 成功占用 slot 1 */
+    LCD_Result res1 = GC9A01_PortInitWithConfig(&dev1, &cfg1);
+    CHECK(res1 == LCD_OK, "Init dev1 succeeds");
+
+    /* 2. 重复初始化 dev1 -> 应当复用已有 slot，不浪费新 slot */
+    cfg1.spi_clock_hz = 12000000U;
+    LCD_Result res1_reinit = GC9A01_PortInitWithConfig(&dev1, &cfg1);
+    CHECK(res1_reinit == LCD_OK, "Re-init dev1 succeeds and reuses existing slot");
+
+    /* 3. 初始化默认 g_lcd -> 成功占用 slot 0 */
+    LCD_Result res_def = GC9A01_PortInit();
+    CHECK(res_def == LCD_OK, "Init default g_lcd succeeds in slot 0");
+
+    /* 此时 slot 0 和 slot 1 均已被占用 (GC9A01_MAX_INSTANCES = 2) */
+
+    /* 4. 初始化第 3 个不同设备 dev2 -> 槽位已满，必须直接返回 LCD_ERROR_PARAM */
+    LCD_Result res2 = GC9A01_PortInitWithConfig(&dev2, &cfg1);
+    CHECK(res2 == LCD_ERROR_PARAM, "Init dev2 fails with LCD_ERROR_PARAM due to slot exhaustion");
+
+    /* 5. 验证已分配的 dev1 上下文未被破坏覆盖 */
+    CHECK(dev1.port != NULL, "dev1 port table remains intact");
+    CHECK(dev1.port->write != NULL, "dev1 write op intact");
+
+    /* 6. 初始化 dev3 同样安全拒绝 */
+    LCD_Result res3 = GC9A01_PortInitWithConfig(&dev3, &cfg1);
+    CHECK(res3 == LCD_ERROR_PARAM, "Init dev3 fails with LCD_ERROR_PARAM");
+}
+
+/* ================================================================================== */
+/* M11: W25QXX 静态槽位用尽保护与设备复用                                              */
+/* ================================================================================== */
+static void test_M11_w25qxx_slot_exhaustion_and_reuse(void)
+{
+    printf("\n[Test M11] W25QXX Slot Exhaustion and Reuse\n");
+
+    BSP_SPI_ResetBuses();
+    W25QXX_Port_ResetSlots();
+    mock_reset();
+
+    spi_bus_t *bus1 = BSP_SPI1_GetBus();
+    W25QXX_PortConfig cfg1 = {
+        .bus          = bus1,
+        .spi_clock_hz = 9000000U,
+        .spi_mode     = SPI_BUS_MODE_0,
+        .use_dma      = 1,
+        .cs_port      = GPIOA,
+        .cs_pin       = LL_GPIO_PIN_8,
+    };
+
+    W25QXX_Device flash1, flash2, flash3;
+    memset(&flash1, 0, sizeof(flash1));
+    memset(&flash2, 0, sizeof(flash2));
+    memset(&flash3, 0, sizeof(flash3));
+
+    /* 1. 初始化 flash1 -> 占用 slot 1 */
+    W25QXX_Result res1 = W25QXX_PortInitWithConfig(&flash1, &cfg1);
+    CHECK(res1 == W25QXX_OK, "Init flash1 succeeds");
+
+    /* 2. 重复初始化 flash1 -> 复用现有槽位 */
+    cfg1.spi_clock_hz = 6000000U;
+    W25QXX_Result res1_reinit = W25QXX_PortInitWithConfig(&flash1, &cfg1);
+    CHECK(res1_reinit == W25QXX_OK, "Re-init flash1 succeeds and reuses existing slot");
+
+    /* 3. 初始化默认 g_flash -> 占用 slot 0 */
+    W25QXX_PortInit();
+    CHECK(g_flash.bus != NULL, "Init default g_flash succeeds in slot 0");
+
+    /* 4. 初始化第 3 个不同设备 flash2 -> 槽位已满，必须直接返回 W25QXX_ERROR_PARAM */
+    W25QXX_Result res2 = W25QXX_PortInitWithConfig(&flash2, &cfg1);
+    CHECK(res2 == W25QXX_ERROR_PARAM, "Init flash2 fails with W25QXX_ERROR_PARAM due to slot exhaustion");
+
+    /* 5. 验证已分配 flash1 上下文未被破坏覆盖 */
+    CHECK(flash1.bus != NULL, "flash1 bus ops intact");
+
+    /* 6. 初始化 flash3 同样安全拒绝 */
+    W25QXX_Result res3 = W25QXX_PortInitWithConfig(&flash3, &cfg1);
+    CHECK(res3 == W25QXX_ERROR_PARAM, "Init flash3 fails with W25QXX_ERROR_PARAM");
+}
+
+/* ================================================================================== */
+/* M12: 双 SPI GPIO 资源冲突检查与配置约束                                            */
+/* ================================================================================== */
+static void test_M12_dual_spi_gpio_conflict_guard(void)
+{
+    printf("\n[Test M12] Dual SPI GPIO Conflict Guard\n");
+
+    BSP_SPI_ResetBuses();
+    GC9A01_Port_ResetSlots();
+    mock_reset();
+
+    spi_bus_t *bus1 = BSP_SPI1_GetBus();
+
+    /* 场景 A: TFT DC 绑定 PB13 时，尝试启用 SPI2 (SCK 为 PB13) */
+    GC9A01_PortConfig cfg_pb13 = {
+        .bus          = bus1,
+        .spi_clock_hz = 18000000U,
+        .spi_mode     = SPI_BUS_MODE_0,
+        .use_dma      = 1,
+        .cs_port      = GPIOA,
+        .cs_pin       = LL_GPIO_PIN_9,
+        .rst_port     = GPIOA,
+        .rst_pin      = LL_GPIO_PIN_10,
+        .dc_port      = GPIOB,
+        .dc_pin       = LL_GPIO_PIN_13, /* 占用 PB13 */
+    };
+
+    LCD_Device lcd_dev;
+    CHECK(GC9A01_PortInitWithConfig(&lcd_dev, &cfg_pb13) == LCD_OK, "Init LCD with DC=PB13 on SPI1 succeeds");
+    CHECK(GC9A01_Port_IsPinUsed(GPIOB, LL_GPIO_PIN_13) == 1, "GC9A01_Port_IsPinUsed reports PB13 occupied");
+
+    /* 此时尝试获取 SPI2：因 PB13 已被 TFT DC 占用，必须返回 NULL 拒绝使能 */
+    spi_bus_t *spi2_conflict = BSP_SPI_GetBus(BSP_SPI_BUS_2);
+    CHECK(spi2_conflict == NULL, "BSP_SPI_GetBus(SPI2) returns NULL when PB13 is used by TFT DC");
+    CHECK(BSP_SPI_IsBusActive(BSP_SPI_BUS_2) == 0, "SPI2 is NOT active due to GPIO conflict");
+
+    /* 场景 B: 复位环境，先启用 SPI2，再尝试将 TFT DC 绑定至 PB13 */
+    BSP_SPI_ResetBuses();
+    GC9A01_Port_ResetSlots();
+    mock_reset();
+
+    spi_bus_t *spi2_ok = BSP_SPI_GetBus(BSP_SPI_BUS_2);
+    CHECK(spi2_ok != NULL, "SPI2 initializes cleanly when PB13 is free");
+    CHECK(BSP_SPI_IsBusActive(BSP_SPI_BUS_2) == 1, "SPI2 is active");
+
+    /* 尝试将 TFT DC 配置为 PB13 -> 必须被 GC9A01_PortInitWithConfig 拒绝 */
+    cfg_pb13.bus = BSP_SPI1_GetBus();
+    LCD_Result res_conflict = GC9A01_PortInitWithConfig(&lcd_dev, &cfg_pb13);
+    CHECK(res_conflict == LCD_ERROR_PARAM, "Init LCD with DC=PB13 rejected when SPI2 is active");
+
+    /* 场景 C: 将 TFT DC 切换至非冲突引脚 PA4 -> 顺利共存 */
+    GC9A01_PortConfig cfg_pa4 = cfg_pb13;
+    cfg_pa4.bus     = BSP_SPI1_GetBus();
+    cfg_pa4.dc_port = GPIOA;
+    cfg_pa4.dc_pin  = LL_GPIO_PIN_4; /* 改用 PA4 */
+
+    LCD_Result res_coexist = GC9A01_PortInitWithConfig(&lcd_dev, &cfg_pa4);
+    CHECK(res_coexist == LCD_OK, "Init LCD with DC=PA4 succeeds alongside active SPI2");
+    CHECK(GC9A01_Port_IsPinUsed(GPIOA, LL_GPIO_PIN_4) == 1, "PA4 reported in use by LCD");
+    CHECK(GC9A01_Port_IsPinUsed(GPIOB, LL_GPIO_PIN_13) == 0, "PB13 reported NOT used by LCD");
+}
+
+/* ================================================================================== */
 /* 主函数                                                                             */
 /* ================================================================================== */
 
@@ -468,6 +682,10 @@ int main(void)
     test_M06_bus_a_timeout_does_not_affect_bus_b();
     test_M07_bus_a_recovery_isolated();
     test_M08_full_lifecycle_and_nested_release();
+    test_M09_recover_bus_handle_validation();
+    test_M10_gc9a01_slot_exhaustion_and_reuse();
+    test_M11_w25qxx_slot_exhaustion_and_reuse();
+    test_M12_dual_spi_gpio_conflict_guard();
 
     printf("\n--------------------------------------------------------------------\n");
     printf("Summary: %d assertions, %d failures\n", g_assert_count, g_fail);

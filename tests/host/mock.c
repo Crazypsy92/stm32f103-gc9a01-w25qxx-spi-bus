@@ -39,8 +39,27 @@ static uint32_t mock_dma_isr_rd(void)
     return mock_dma_isr;
 }
 
+/* 仿真毫秒计数与延时 */
+static volatile uint32_t s_mock_tick = 0;
+
+uint32_t GetTick_ms(void)
+{
+    return s_mock_tick++;
+}
+
+void Delay_ms(uint32_t ms)
+{
+    s_mock_tick += ms;
+}
+
+void Delay_us(uint32_t us)
+{
+    (void)us;
+}
+
 void mock_reset(void)
 {
+    s_mock_tick = 0;
     memset(&mock_gpioa, 0, sizeof(mock_gpioa));
     memset(&mock_gpiob, 0, sizeof(mock_gpiob));
     memset(&mock_gpioc, 0, sizeof(mock_gpioc));
@@ -55,11 +74,11 @@ void mock_reset(void)
     mock_dma1.isr_read = mock_dma_isr_rd;
 
     mock_cyccnt = 0;
-    mock_dwt_step = 0;
-    mock_spi_sr = 0;
+    mock_dwt_step = 1;
+    mock_spi_sr = SR_TXE;
     mock_spi_rx = 0;
     mock_spi_tx = 0;
-    mock_dma_isr = 0;
+    mock_dma_isr = DMA_ISR_TCIF1 | DMA_ISR_TCIF2 | DMA_ISR_TCIF3 | DMA_ISR_TCIF4 | DMA_ISR_TCIF5;
     memset((void*)mock_dma_en, 0, sizeof(mock_dma_en));
     memset((void*)mock_cndtr_cnt, 0, sizeof(mock_cndtr_cnt));
     memset((void*)mock_cndtr_log, 0, sizeof(mock_cndtr_log));

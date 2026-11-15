@@ -35,6 +35,18 @@ spi_bus_t *BSP_SPI1_GetBus(void);
 spi_bus_t *BSP_SPI2_GetBus(void);
 
 /**
+ * @brief 查询指定 SPI 总线是否已完成硬件初始化并处于就绪态
+ * @param id BSP_SPI_BUS_1 或 BSP_SPI_BUS_2
+ * @return 1: 已就绪; 0: 未初始化或无效
+ */
+uint8_t BSP_SPI_IsBusActive(bsp_spi_id_t id);
+
+/**
+ * @brief 重置板级 SPI 总线单例状态（主要供单元测试复位环境使用）
+ */
+void BSP_SPI_ResetBuses(void);
+
+/**
  * @brief  对指定总线执行硬件级异常恢复
  * @param  bus 目标抽象总线指针
  * @return 0 成功，负值失败

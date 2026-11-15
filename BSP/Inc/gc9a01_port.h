@@ -45,4 +45,17 @@ LCD_Result GC9A01_PortInitWithConfig(LCD_Device *dev, const GC9A01_PortConfig *c
  */
 LCD_Result GC9A01_PortInit(void);
 
+/**
+ * @brief 检查指定 GPIO 引脚是否已被 GC9A01 占用为控制线 (CS, RST, DC)
+ * @param port GPIO 端口
+ * @param pin  GPIO 引脚掩码
+ * @return 1: 已被占用; 0: 未占用
+ */
+uint8_t GC9A01_Port_IsPinUsed(const GPIO_TypeDef *port, uint32_t pin);
+
+/**
+ * @brief 重置 GC9A01 端口层所有静态槽位（主要供单元测试复位环境使用）
+ */
+void GC9A01_Port_ResetSlots(void);
+
 #endif /* __GC9A01_PORT_H__ */

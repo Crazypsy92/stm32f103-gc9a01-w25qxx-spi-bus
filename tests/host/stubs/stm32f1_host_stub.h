@@ -89,6 +89,14 @@ extern volatile uint32_t mock_configure_calls; /* ll_configure 被调用次数 *
 #define DMA_ISR_TEIF2 (1U << 7)
 #define DMA_ISR_TCIF3 (1U << 9)
 #define DMA_ISR_TEIF3 (1U << 11)
+#define DMA_ISR_TCIF4 (1U << 13)
+#define DMA_ISR_TEIF4 (1U << 15)
+#define DMA_ISR_TCIF5 (1U << 17)
+#define DMA_ISR_TEIF5 (1U << 19)
+#define DMA_ISR_TCIF6 (1U << 21)
+#define DMA_ISR_TEIF6 (1U << 23)
+#define DMA_ISR_TCIF7 (1U << 25)
+#define DMA_ISR_TEIF7 (1U << 27)
 
 /* IFCR 写 1 清标志位（桩中写入 IFCR 不改变 mock_dma_isr，
    各测试通过 mock_reset() 复位状态） */
@@ -111,14 +119,36 @@ static inline void LL_APB2_GRP1_EnableClock(uint32_t x) { (void)x; }
 static inline void LL_APB1_GRP1_EnableClock(uint32_t x) { (void)x; }
 static inline void LL_AHB1_GRP1_EnableClock(uint32_t x) { (void)x; }
 
-/* ===== GPIO（无操作） ===== */
+/* ===== GPIO ===== */
 typedef struct { uint32_t Pin; uint32_t Mode; uint32_t Speed; uint32_t OutputType;
                  uint32_t Pull; uint32_t Alternate; } LL_GPIO_InitTypeDef;
 #define LL_GPIO_MODE_ALTERNATE   0
 #define LL_GPIO_MODE_FLOATING    0
+#define LL_GPIO_MODE_OUTPUT      1
 #define LL_GPIO_SPEED_FREQ_HIGH  0
 #define LL_GPIO_OUTPUT_PUSHPULL  0
+
+#define LL_GPIO_PIN_0   (1U << 0)
+#define LL_GPIO_PIN_1   (1U << 1)
+#define LL_GPIO_PIN_2   (1U << 2)
+#define LL_GPIO_PIN_3   (1U << 3)
+#define LL_GPIO_PIN_4   (1U << 4)
+#define LL_GPIO_PIN_5   (1U << 5)
+#define LL_GPIO_PIN_6   (1U << 6)
+#define LL_GPIO_PIN_7   (1U << 7)
+#define LL_GPIO_PIN_8   (1U << 8)
+#define LL_GPIO_PIN_9   (1U << 9)
+#define LL_GPIO_PIN_10  (1U << 10)
+#define LL_GPIO_PIN_11  (1U << 11)
+#define LL_GPIO_PIN_12  (1U << 12)
+#define LL_GPIO_PIN_13  (1U << 13)
+#define LL_GPIO_PIN_14  (1U << 14)
+#define LL_GPIO_PIN_15  (1U << 15)
+#define LL_GPIO_PIN_ALL 0x0000FFFFU
+
 static inline void LL_GPIO_Init(GPIO_TypeDef *p, LL_GPIO_InitTypeDef *g) { (void)p; (void)g; }
+static inline void LL_GPIO_SetOutputPin(GPIO_TypeDef *p, uint32_t pin) { (void)p; (void)pin; }
+static inline void LL_GPIO_ResetOutputPin(GPIO_TypeDef *p, uint32_t pin) { (void)p; (void)pin; }
 
 /* ===== SPI ===== */
 #define LL_SPI_BAUDRATEPRESCALER_DIV2   0
@@ -161,6 +191,14 @@ static inline void     LL_SPI_ClearFlag_OVR(SPI_TypeDef *s) { (void)s; mock_spi_
 static inline uint32_t LL_SPI_DMA_GetRegAddr(SPI_TypeDef *s) { return (uint32_t)(uintptr_t)&s->DR; }
 
 /* ===== DMA ===== */
+#define LL_DMA_CHANNEL_1              1
+#define LL_DMA_CHANNEL_2              2
+#define LL_DMA_CHANNEL_3              3
+#define LL_DMA_CHANNEL_4              4
+#define LL_DMA_CHANNEL_5              5
+#define LL_DMA_CHANNEL_6              6
+#define LL_DMA_CHANNEL_7              7
+
 #define LL_DMA_MODE_NORMAL            0
 #define LL_DMA_PERIPH_NOINCREMENT     0
 #define LL_DMA_MEMORY_INCREMENT       0

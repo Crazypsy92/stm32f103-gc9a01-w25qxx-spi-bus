@@ -75,6 +75,149 @@ typedef struct {
 
 volatile app_dual_test_result_t g_app_dual_result;
 
+/* Stage 2.2-A-HIL: 板级硬件与 TFT 最小诊断变量导出 */
+volatile bsp_diag_info_t  g_bsp_diag;
+volatile tft_diag_result_t g_tft_diag;
+volatile tft_diag_result_t g_tft_diag_stages[8];
+volatile uint32_t         g_tft_diag_stage_count = 0;
+
+void AppTFT_DiagInit(void)
+{
+    g_bsp_diag.magic         = 0x44494147U; /* 'DIAG' */
+    g_bsp_diag.dual_spi_mode = CONFIG_DUAL_SPI;
+#if defined(CONFIG_TFT_ONLY) && (CONFIG_TFT_ONLY != 0)
+    g_bsp_diag.tft_only_mode = 1U;
+#else
+    g_bsp_diag.tft_only_mode = 0U;
+#endif
+#if defined(CONFIG_DUAL_SPI) && (CONFIG_DUAL_SPI != 0)
+    g_bsp_diag.tft_dc_pin     = 4U;
+    g_bsp_diag.tft_dc_port_id = 0U; /* GPIOA */
+    g_bsp_diag.flash_bus_id   = 2U;
+#else
+    g_bsp_diag.tft_dc_pin     = 13U;
+    g_bsp_diag.tft_dc_port_id = 1U; /* GPIOB */
+    g_bsp_diag.flash_bus_id   = 1U;
+#endif
+    g_bsp_diag.tft_bus_id    = 1U;
+    g_bsp_diag.tft_speed_hz  = 18000000U;
+    g_bsp_diag.tft_use_dma   = 1U;
+}
+
+void AppTFT_DiagRun(uint32_t clock_hz, uint8_t use_dma)
+{
+    AppTFT_DiagInit();
+    g_bsp_diag.tft_speed_hz = clock_hz;
+    g_bsp_diag.tft_use_dma  = use_dma;
+
+    memset((void *)&g_tft_diag, 0, sizeof(g_tft_diag));
+    g_tft_diag.magic    = 0x54465444U; /* 'TFTD' */
+    g_tft_diag.clock_hz = clock_hz;
+    g_tft_diag.use_dma  = use_dma;
+
+    /* 初始化 GC9A01 硬件 */
+    GC9A01_PortConfig cfg = {
+        .bus          = NULL, /* Auto-bind SPI1 */
+        .spi_clock_hz = clock_hz,
+        .spi_mode     = SPI_BUS_MODE_0,
+        .use_dma      = use_dma,
+#if defined(CONFIG_DUAL_SPI) && (CONFIG_DUAL_SPI != 0)
+        .dc_port      = GPIOA,
+        .dc_pin       = LL_GPIO_PIN_4,
+#else
+        .dc_port      = GPIOB,
+        .dc_pin       = LL_GPIO_PIN_13,
+#endif
+        .cs_port      = GPIOA,
+        .cs_pin       = LL_GPIO_PIN_9,
+        .rst_port     = GPIOA,
+        .rst_pin      = LL_GPIO_PIN_10,
+    };
+
+    LCD_Result init_res = GC9A01_PortInitWithConfig(&g_lcd, &cfg);
+    g_tft_diag.init_result = (uint32_t)init_res;
+
+    if (init_res != LCD_OK) {
+        g_tft_diag.spi_err_count++;
+        g_tft_diag.test_complete = 1;
+        return;
+    }
+
+    /* 依次填充黑、红、绿、蓝、白五种全屏纯色 (480B 行缓冲) */
+    g_tft_diag.current_step = 1;
+    g_tft_diag.fill_black_res = (uint32_t)LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, BLACK);
+    if (g_tft_diag.fill_black_res == LCD_OK) g_tft_diag.fills_ok_count++;
+    Delay_ms(800);
+
+    g_tft_diag.current_step = 2;
+    g_tft_diag.fill_red_res = (uint32_t)LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, RED);
+    if (g_tft_diag.fill_red_res == LCD_OK) g_tft_diag.fills_ok_count++;
+    Delay_ms(800);
+
+    g_tft_diag.current_step = 3;
+    g_tft_diag.fill_green_res = (uint32_t)LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, GREEN);
+    if (g_tft_diag.fill_green_res == LCD_OK) g_tft_diag.fills_ok_count++;
+    Delay_ms(800);
+
+    g_tft_diag.current_step = 4;
+    g_tft_diag.fill_blue_res = (uint32_t)LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, BLUE);
+    if (g_tft_diag.fill_blue_res == LCD_OK) g_tft_diag.fills_ok_count++;
+    Delay_ms(800);
+
+    g_tft_diag.current_step = 5;
+    g_tft_diag.fill_white_res = (uint32_t)LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, WHITE);
+    if (g_tft_diag.fill_white_res == LCD_OK) g_tft_diag.fills_ok_count++;
+    Delay_ms(800);
+
+    /* 检查 DMA 错误标志（如果启用了 DMA） */
+    if (use_dma) {
+        g_tft_diag.dma_state = LL_DMA_IsActiveFlag_TE3(DMA1) ? 1U : 0U;
+    } else {
+        g_tft_diag.dma_state = 0U;
+    }
+
+    g_tft_diag.current_step = 6;
+    g_tft_diag.test_complete = 1;
+}
+
+void AppTFT_DiagRunAll(void)
+{
+    static const struct {
+        uint32_t clock_hz;
+        uint8_t  use_dma;
+    } tests[8] = {
+        {  1125000U, 0U },
+        {  4500000U, 0U },
+        {  9000000U, 0U },
+        { 18000000U, 0U },
+        {  1125000U, 1U },
+        {  4500000U, 1U },
+        {  9000000U, 1U },
+        { 18000000U, 1U },
+    };
+
+    g_tft_diag_stage_count = 0;
+    for (uint32_t i = 0; i < 8; i++) {
+        AppTFT_DiagRun(tests[i].clock_hz, tests[i].use_dma);
+        g_tft_diag_stages[i] = g_tft_diag;
+        g_tft_diag_stage_count = i + 1;
+        Delay_ms(500);
+    }
+}
+
+void AppTFT_DiagLoop(void)
+{
+    static uint32_t last_time = 0;
+    static uint8_t color_idx = 0;
+    static const uint16_t colors[5] = { BLACK, RED, GREEN, BLUE, WHITE };
+    uint32_t now = GetTick_ms();
+    if (now - last_time >= 1000) {
+        last_time = now;
+        color_idx = (color_idx + 1) % 5;
+        LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, colors[color_idx]);
+    }
+}
+
 /**
  * @brief GC9A01 全屏流式图案演示：240 行 × 240 像素 (115,200 字节)，
  *        使用 480B 小行缓冲逐行流式生成，验证 MCU 有限内存下的全屏刷屏能力。
@@ -173,7 +316,6 @@ void AppFlash_Test(void)
     uint32_t dma480_ok_count = 0;
     uint32_t tft_update_count = 0;
     uint32_t post_read_ok = 0;
-    spi_bus_t *bus = BSP_SPI1_GetBus();
 
     LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, BLACK);
     Draw_Circle(&g_lcd, 120, 120, 113, DARKBLUE);
@@ -238,16 +380,17 @@ void AppFlash_Test(void)
 
     elapsed = GetTick_ms() - elapsed;
 
-    const void *owner_after = spi_bus_owner(bus);
-    uint16_t depth_after = bus->depth;
+    spi_bus_t *bus1 = BSP_SPI1_GetBus();
+    spi_bus_t *bus2 = BSP_SPI_IsBusActive(BSP_SPI_BUS_2) ? BSP_SPI2_GetBus() : NULL;
+    uint8_t owner_ok = (spi_bus_owner(bus1) == NULL) && (bus2 == NULL || spi_bus_owner(bus2) == NULL);
+    uint8_t depth_ok = (bus1->depth == 0U) && (bus2 == NULL || bus2->depth == 0U);
     uint8_t pass = (rounds_ok == DUAL_TEST_ROUNDS) &&
                    (id_ok_count == DUAL_TEST_ROUNDS) &&
                    (dma256_ok_count == DUAL_TEST_ROUNDS) &&
                    (dma480_ok_count == DUAL_TEST_ROUNDS) &&
                    (tft_update_count == DUAL_TEST_ROUNDS) &&
                    (post_read_ok == DUAL_TEST_ROUNDS) &&
-                   (owner_after == NULL) &&
-                   (depth_after == 0U);
+                   owner_ok && depth_ok;
 
     g_app_dual_result.magic            = 0x4455414CU; /* 'DUAL' */
     g_app_dual_result.rounds_ok        = rounds_ok;
@@ -257,8 +400,8 @@ void AppFlash_Test(void)
     g_app_dual_result.dma480_ok_count  = dma480_ok_count;
     g_app_dual_result.tft_update_count = tft_update_count;
     g_app_dual_result.post_read_ok     = post_read_ok;
-    g_app_dual_result.owner_null       = (owner_after == NULL) ? 1U : 0U;
-    g_app_dual_result.depth_zero       = (depth_after == 0U) ? 1U : 0U;
+    g_app_dual_result.owner_null       = owner_ok ? 1U : 0U;
+    g_app_dual_result.depth_zero       = depth_ok ? 1U : 0U;
     g_app_dual_result.pass             = pass ? 1U : 0U;
     g_app_dual_result.elapsed_ms       = elapsed;
 
@@ -640,8 +783,16 @@ void AppBusTest(void)
         sum += rx[i];
     }
 
-    owner_after = spi_bus_owner(bus);
-    depth_after = bus->depth;
+    spi_bus_t *bus1 = BSP_SPI1_GetBus();
+    spi_bus_t *bus2 = BSP_SPI_IsBusActive(BSP_SPI_BUS_2) ? BSP_SPI2_GetBus() : NULL;
+    owner_after = spi_bus_owner(bus1);
+    if (owner_after == NULL && bus2 != NULL) {
+        owner_after = spi_bus_owner(bus2);
+    }
+    depth_after = bus1->depth;
+    if (depth_after == 0U && bus2 != NULL) {
+        depth_after = bus2->depth;
+    }
 
     /* 校验已知设备 ID: W25Q128 (0xEF17) */
     uint8_t id_match = (g_flash.id == W25Q128 && g_flash.capacity == 16U * 1024U * 1024U) ? 1U : 0U;

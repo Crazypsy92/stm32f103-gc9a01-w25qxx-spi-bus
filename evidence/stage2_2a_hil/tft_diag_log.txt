@@ -1,0 +1,43 @@
+=== GC9A01 TFT_ONLY HARDWARE DIAGNOSIS LOG ===
+Target MCU: STM32F103C8T6
+Display: GC9A01 240x240 Circular IPS LCD (RGB565)
+Bus: SPI1 (SCK=PA5, MOSI=PA7, CS=PA9, RST=PA10)
+Hardware Mode: DUAL_SPI Pinout (DC=PA4, Flash on SPI2)
+
+[Diagnostic Step 1: Low-Speed Polling Baseline]
+Configuration: 1.125 MHz (DIV64), SPI Mode 0, Polling (use_dma=0)
+- GC9A01_PortInitWithConfig: LCD_OK (0)
+- Fill Step 1 (BLACK 0x0000): LCD_OK (0)
+- Fill Step 2 (RED   0xF800): LCD_OK (0)
+- Fill Step 3 (GREEN 0x07E0): LCD_OK (0)
+- Fill Step 4 (BLUE  0x001F): LCD_OK (0)
+- Fill Step 5 (WHITE 0xFFFF): LCD_OK (0)
+- Fills OK Count: 5/5
+- SPI Bus Errors: 0
+- DMA Errors: 0
+- Visual Verification: User observed continuous cycling between Black, Red, Green, Blue, White with 0 garble/blur.
+
+[Diagnostic Step 2: High-Speed Polling]
+Configuration: 18.000 MHz (DIV4), SPI Mode 0, Polling (use_dma=0)
+- GC9A01_PortInitWithConfig: LCD_OK (0)
+- Fill Step 1..5: All LCD_OK (0)
+- Fills OK Count: 5/5
+- SPI Bus Errors: 0
+- DMA Errors: 0
+
+[Diagnostic Step 3: High-Speed DMA]
+Configuration: 18.000 MHz (DIV4), SPI Mode 0, DMA1 Channel 3 (use_dma=1)
+- GC9A01_PortInitWithConfig: LCD_OK (0)
+- Fill Step 1..5: All LCD_OK (0)
+- Fills OK Count: 5/5
+- SPI Bus Errors: 0
+- DMA Error Flags (TEIF3): 0
+
+[Root Cause Analysis of Initial "花屏" (Blurred/Garbled Display)]
+1. Pin Mapping Mismatch:
+   - When the user moved the physical jumper wire of TFT DC from PB13 to PA4 (to prepare for Dual SPI where PB13 is used by SPI2_SCK), firmware built with SHARED_SPI1 (which drove PB13) left PA4 floating.
+   - Without a valid DC signal driving PA4, GC9A01 could not distinguish command bytes (0x2A Column Address, 0x2B Row Address, 0x2C Memory Write) from pixel stream data.
+   - The display controller treated command coordinates as pixel data and pixel data as configuration registers, corrupting internal registers and producing garbled pixels ("花屏").
+2. Verification of Fix:
+   - Rebuilding firmware with CONFIG_DUAL_SPI=1 correctly associates GC9A01 DC control with PA4 (LL_GPIO_PIN_4).
+   - Upon running TFT_ONLY on PA4, the screen displays crystal clear solid colors without any artifacts or flickering.

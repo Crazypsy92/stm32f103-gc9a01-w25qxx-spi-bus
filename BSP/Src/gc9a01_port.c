@@ -21,8 +21,13 @@
 #define GC9A01_DEFAULT_RST_PORT     GPIOA
 #define GC9A01_DEFAULT_RST_PIN      LL_GPIO_PIN_10
 
+#if defined(CONFIG_DUAL_SPI) && (CONFIG_DUAL_SPI != 0)
+#define GC9A01_DEFAULT_DC_PORT      GPIOA
+#define GC9A01_DEFAULT_DC_PIN       LL_GPIO_PIN_4
+#else
 #define GC9A01_DEFAULT_DC_PORT      GPIOB
 #define GC9A01_DEFAULT_DC_PIN       LL_GPIO_PIN_13
+#endif
 
 #define GC9A01_DEFAULT_SPI_CLOCK_HZ 18000000U
 #define GC9A01_DEFAULT_SPI_MODE     SPI_BUS_MODE_0
@@ -35,6 +40,7 @@
 /* ================================================================================== */
 
 typedef struct {
+    LCD_Device       *owner_dev;
     spi_bus_t        *bus;
     spi_bus_config_t  cfg;
     GPIO_TypeDef     *cs_port;
@@ -197,22 +203,59 @@ LCD_Result GC9A01_PortInitWithConfig(LCD_Device *dev, const GC9A01_PortConfig *c
         return LCD_ERROR_PARAM;
     }
 
-    /* 分配并持久化上下文槽位（slot 0 保留给默认 g_lcd） */
-    uint32_t slot = 0;
-    if (dev != &g_lcd) {
-        for (slot = 1; slot < GC9A01_MAX_INSTANCES; slot++) {
-            if (!s_lcd_hw[slot].in_use) break;
-        }
-        if (slot >= GC9A01_MAX_INSTANCES) {
-            slot = GC9A01_MAX_INSTANCES - 1U;
+    /* 1. 查找是否已为该 dev 分配过槽位（重复初始化已有设备，复用已有槽位） */
+    int assigned_slot = -1;
+    for (uint32_t i = 0; i < GC9A01_MAX_INSTANCES; i++) {
+        if (s_lcd_hw[i].in_use && s_lcd_hw[i].owner_dev == dev) {
+            assigned_slot = (int)i;
+            break;
         }
     }
 
-    GC9A01_HW *hw = &s_lcd_hw[slot];
-    hw->in_use = 1U;
+    /* 2. 若未分配，寻找空闲槽位；g_lcd 优先分配 slot 0 */
+    if (assigned_slot < 0) {
+        if (dev == &g_lcd && !s_lcd_hw[0].in_use) {
+            assigned_slot = 0;
+        } else {
+            for (uint32_t i = (dev == &g_lcd ? 0U : 1U); i < GC9A01_MAX_INSTANCES; i++) {
+                if (!s_lcd_hw[i].in_use) {
+                    assigned_slot = (int)i;
+                    break;
+                }
+            }
+        }
+    }
 
-    /* 绑定总线（若未指定则使用 SPI1）与参数配置 */
-    hw->bus = (config->bus != NULL) ? config->bus : BSP_SPI1_GetBus();
+    /* 静态槽位用尽时直接返回错误，禁止覆盖已分配上下文 */
+    if (assigned_slot < 0) {
+        return LCD_ERROR_PARAM;
+    }
+
+    GC9A01_HW *hw = &s_lcd_hw[assigned_slot];
+
+    /* 若重复初始化且原先仍持有总线锁，先安全释放清理 */
+    if (hw->in_use && hw->bus != NULL && hw->bus->owner == hw) {
+        while (hw->bus->depth > 0) {
+            (void)spi_bus_release(hw->bus, hw);
+        }
+    }
+
+    GPIO_TypeDef *dc_port = (config->dc_port != NULL) ? config->dc_port : GC9A01_DEFAULT_DC_PORT;
+    uint32_t dc_pin       = (config->dc_pin != 0U) ? config->dc_pin : GC9A01_DEFAULT_DC_PIN;
+    spi_bus_t *bus        = (config->bus != NULL) ? config->bus : BSP_SPI1_GetBus();
+
+    /* 3. GPIO 引脚与总线冲突检查：
+     * 若使用 SPI2，其 SCK 为 PB13。若 TFT DC 配置为 PB13，在 SPI2 启用时将产生引脚冲突。
+     */
+    if (dc_port == GPIOB && dc_pin == LL_GPIO_PIN_13) {
+        if (BSP_SPI_IsBusActive(BSP_SPI_BUS_2)) {
+            return LCD_ERROR_PARAM; /* 冲突拒绝 */
+        }
+    }
+
+    hw->owner_dev = dev;
+    hw->in_use    = 1U;
+    hw->bus       = bus;
     hw->cfg.clock_hz = (config->spi_clock_hz > 0U) ? config->spi_clock_hz : GC9A01_DEFAULT_SPI_CLOCK_HZ;
     hw->cfg.mode     = config->spi_mode;
     hw->cfg.use_dma  = config->use_dma;
@@ -221,8 +264,8 @@ LCD_Result GC9A01_PortInitWithConfig(LCD_Device *dev, const GC9A01_PortConfig *c
     hw->cs_pin   = (config->cs_pin != 0U) ? config->cs_pin : GC9A01_DEFAULT_CS_PIN;
     hw->rst_port = (config->rst_port != NULL) ? config->rst_port : GC9A01_DEFAULT_RST_PORT;
     hw->rst_pin  = (config->rst_pin != 0U) ? config->rst_pin : GC9A01_DEFAULT_RST_PIN;
-    hw->dc_port  = (config->dc_port != NULL) ? config->dc_port : GC9A01_DEFAULT_DC_PORT;
-    hw->dc_pin   = (config->dc_pin != 0U) ? config->dc_pin : GC9A01_DEFAULT_DC_PIN;
+    hw->dc_port  = dc_port;
+    hw->dc_pin   = dc_pin;
 
     hw->port.cs            = Port_Cs;
     hw->port.rst           = Port_Rst;
@@ -253,4 +296,26 @@ LCD_Result GC9A01_PortInit(void)
         .dc_pin       = GC9A01_DEFAULT_DC_PIN,
     };
     return GC9A01_PortInitWithConfig(&g_lcd, &def_cfg);
+}
+
+uint8_t GC9A01_Port_IsPinUsed(const GPIO_TypeDef *port, uint32_t pin)
+{
+    if (port == NULL || pin == 0U) {
+        return 0U;
+    }
+    for (uint32_t i = 0; i < GC9A01_MAX_INSTANCES; i++) {
+        if (s_lcd_hw[i].in_use) {
+            if ((s_lcd_hw[i].cs_port == port && (s_lcd_hw[i].cs_pin & pin)) ||
+                (s_lcd_hw[i].rst_port == port && (s_lcd_hw[i].rst_pin & pin)) ||
+                (s_lcd_hw[i].dc_port == port && (s_lcd_hw[i].dc_pin & pin))) {
+                return 1U;
+            }
+        }
+    }
+    return 0U;
+}
+
+void GC9A01_Port_ResetSlots(void)
+{
+    memset(s_lcd_hw, 0, sizeof(s_lcd_hw));
 }

@@ -61,6 +61,22 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 # Add project symbols (macros)
+option(CONFIG_DUAL_SPI "Enable Dual SPI mode: TFT on SPI1 (DC=PA4), Flash on SPI2 (PB13/14/15)" OFF)
+if(CONFIG_DUAL_SPI)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE CONFIG_DUAL_SPI=1)
+    message(STATUS "SPI Mode: DUAL_SPI (TFT on SPI1 DC=PA4, Flash on SPI2 PB13/14/15)")
+else()
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE CONFIG_DUAL_SPI=0)
+    message(STATUS "SPI Mode: SHARED_SPI1 (TFT and Flash on SPI1 DC=PB13)")
+endif()
+
+option(CONFIG_TFT_ONLY "Enable TFT-only hardware diagnostic mode (Flash & TIM2 disabled)" OFF)
+if(CONFIG_TFT_ONLY)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE CONFIG_TFT_ONLY=1)
+    message(STATUS "Diagnostic Mode: TFT_ONLY (Flash & TIM2 disabled)")
+else()
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE CONFIG_TFT_ONLY=0)
+endif()
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
 )
