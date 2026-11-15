@@ -18,6 +18,12 @@ add_executable(test_ll test_ll.c mock.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../BSP/Src/spi_stm32_ll.c)
 target_include_directories(test_ll PRIVATE ${STUB_DIR} ${BSP_INC})
 
+# ---- Flash 可靠性与安全测试 (Stage 1.2: 编译真实 w25qxx.c) ----
+add_executable(test_flash test_flash.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../BSP/Src/w25qxx.c)
+target_include_directories(test_flash PRIVATE ${STUB_DIR} ${BSP_INC})
+
 enable_testing()
-add_test(NAME bus COMMAND test_bus)
-add_test(NAME ll  COMMAND test_ll)
+add_test(NAME bus   COMMAND test_bus)
+add_test(NAME ll    COMMAND test_ll)
+add_test(NAME flash COMMAND test_flash)

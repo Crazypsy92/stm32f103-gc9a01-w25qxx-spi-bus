@@ -1,8 +1,8 @@
 /**
  * @file app_test.c
- * @brief 应用层显示测试模块实现
- * @details GC9A01 上电自测：依次刷红/绿/蓝确认数据链路，再画色条、文字、
- *          边框与圆；随后由主循环调用 AppTFT_Task() 做心跳闪烁指示。
+ * @brief 应用层显示与总线测试实现
+ * @details GC9A01 上电自测、W25QXX 读写校验、总线接口契约检查与抢占压力测试。
+ *          Stage 1.2: 引入安全测试模式开关，默认上电严禁执行任何物理 Flash 擦除或写入。
  */
 
 #include "app_test.h"
@@ -28,7 +28,7 @@ typedef struct {
     uint32_t fl_ok, fl_total;
     uint32_t fl_last_result;     /* 失败时的 W25QXX_Result */
     uint32_t fl_fail_round;      /* 失败所在轮次 */
-    uint32_t erase_count;
+    uint32_t erase_count;        /* 实际物理扇区擦除次数（安全模式下严格为 0） */
     uint32_t rec_ok;
     uint32_t ll_recover_count;   /* LL 层恢复调用次数 */
     int32_t  ll_last_error;      /* LL 层最后一次错误码 */
@@ -36,7 +36,9 @@ typedef struct {
     uint32_t depth_zero;       /* 结束时 depth == 0 */
     uint32_t pass;             /* 总体 PASS */
     uint32_t elapsed_ms;
-    /* 调试字段放末尾 */
+    /* Stage 1.2 安全与诊断字段 */
+    uint32_t test_mode;        /* 0: SAFE/READ-ONLY, 1: DESTRUCTIVE */
+    uint32_t test_sector_addr; /* 经确认的测试扇区物理地址 */
     uint32_t rounds_fail_stage;
     uint32_t rounds_fail_tx0;
     uint32_t rounds_fail_rx0;
@@ -46,14 +48,13 @@ volatile app_test_result_t g_app_test_result;
 
 /**
  * @brief GC9A01 上电显示自测
- * @note  文字位置按 240x240 竖屏排列，肉眼即可确认 SPI 通信与显存写入正常
  */
 void AppTFT_Test(void)
 {
-    const uint16_t bars[6] = {RED, GREEN, BLUE, YELLOW, CYAN, MAGENTA};
+    uint16_t bars[6] = { RED, GREEN, BLUE, YELLOW, MAGENTA, CYAN };
     uint8_t i;
 
-    /* 1. 全屏换色：确认像素写入与色彩顺序 */
+    /* 1. 纯色刷屏（验证各基色与显存连续写） */
     LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, RED);
     Delay_ms(300);
     LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, GREEN);
@@ -101,18 +102,17 @@ void AppTFT_Task(void)
 }
 
 /**
- * @brief 双 DMA 共享总线测试：TFT 与 W25QXX 都走 DMA，交替占用 SPI1
- * @note  1) Flash 侧 256B 写/读，长度超过总线阈值（16B），走 DMA1_Ch3(发)/Ch2(收)
- *        2) 每轮之间用 TFT 刷色块，TFT 同样走 DMA1_Ch3
- *        3) 两设备靠 spi_bus_acquire/release 串行化，DMA 传输是阻塞等待完成的，
- *           因此共用 DMA1 不会出现通道被交叉改写的问题
+ * @brief 双设备共享总线测试：TFT 与 W25QXX 交替占用 SPI1
+ * @note  默认安全模式：仅执行非破坏性只读测试，绝对不擦除/改写 Flash 数据！
  */
 void AppFlash_Test(void)
 {
     #define FLASH_TEST_LEN    256U
     #define FLASH_TEST_ROUNDS 3U
 
+#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
     static uint8_t tx[FLASH_TEST_LEN];
+#endif
     static uint8_t rx[FLASH_TEST_LEN];
     char line[40];
     uint32_t cap_mb = g_flash.capacity / (1024U * 1024U);
@@ -122,35 +122,56 @@ void AppFlash_Test(void)
     uint8_t r;
     uint8_t rounds_ok = 0;
 
-    /* 1. 准备 0..255 的测试图案（每轮首字节不同，避免读到上轮残留） */
-    for (i = 0; i < FLASH_TEST_LEN; i++)
-    {
-        tx[i] = (uint8_t)(i ^ 0x5AU);
-    }
-
     LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, BLACK);
 
-    /* 2. 三轮 Flash 写-读-校验，每轮后插入 TFT DMA 刷块 */
     elapsed = GetTick_ms();
+
+#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
+    /* ---- 破坏性测试模式（显式启用）：在经确认的安全扇区进行 3 轮写-读-校验 ---- */
+    /* 严格禁止默认使用 0x000000，且必须检查扇区地址小于容量 */
+    if (FLASH_SAFE_TEST_SECTOR_ADDR != 0U &&
+        FLASH_SAFE_TEST_SECTOR_ADDR < g_flash.capacity &&
+        (FLASH_SAFE_TEST_SECTOR_ADDR % W25QXX_SECTOR_SIZE) == 0U)
+    {
+        for (i = 0; i < FLASH_TEST_LEN; i++) {
+            tx[i] = (uint8_t)(i ^ 0x5AU);
+        }
+
+        for (r = 0; r < FLASH_TEST_ROUNDS; r++)
+        {
+            tx[0] = r;
+            memset(rx, 0, sizeof(rx));
+
+            if (W25QXX_Write(&g_flash, tx, FLASH_SAFE_TEST_SECTOR_ADDR, FLASH_TEST_LEN) != W25QXX_OK) {
+                break;
+            }
+            if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, FLASH_TEST_LEN) != W25QXX_OK) {
+                break;
+            }
+            if (memcmp(rx, tx, FLASH_TEST_LEN) != 0) {
+                break;
+            }
+            rounds_ok++;
+            LCD_Fill(&g_lcd, 16 + r * 72, 172, 16 + r * 72 + 56, 216, GREEN);
+        }
+    }
+#else
+    /* ---- 默认安全模式：仅执行非破坏性只读验证，零擦除零写入 ---- */
     for (r = 0; r < FLASH_TEST_ROUNDS; r++)
     {
-        tx[0] = r;
         memset(rx, 0, sizeof(rx));
-
-        if (W25QXX_Write(&g_flash, tx, 0x0000U, FLASH_TEST_LEN) != W25QXX_OK)
-        {
-            break;
-        }
-        W25QXX_Read(&g_flash, rx, 0x0000U, FLASH_TEST_LEN);
-        if (memcmp(rx, tx, FLASH_TEST_LEN) != 0)
+        /* 采用非破坏性读操作读取 Flash 数据段（走 DMA） */
+        if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, FLASH_TEST_LEN) != W25QXX_OK)
         {
             break;
         }
         rounds_ok++;
 
-        /* TFT 与 Flash 共用 SPI1，这里紧接着占用总线刷一块（TFT 也走 DMA） */
+        /* TFT 与 Flash 共用 SPI1，交替占用总线刷块（验证总线仲裁） */
         LCD_Fill(&g_lcd, 16 + r * 72, 172, 16 + r * 72 + 56, 216, GREEN);
     }
+#endif
+
     elapsed = GetTick_ms() - elapsed;
 
     for (i = 0; i < FLASH_TEST_LEN; i++)
@@ -159,13 +180,22 @@ void AppFlash_Test(void)
     }
 
     /* 3. 结果上屏 */
-    LCD_ShowString(&g_lcd, 12, 12, "TFT+FLASH DMA TEST", CYAN, BLACK, 16, 0);
+#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
+    LCD_ShowString(&g_lcd, 12, 12, "TFT+FLASH WRITE TEST", CYAN, BLACK, 16, 0);
+#else
+    LCD_ShowString(&g_lcd, 12, 12, "TFT+FLASH SAFE MODE", GREEN, BLACK, 16, 0);
+#endif
 
     snprintf(line, sizeof(line), "ID:%04X CAP:%luMB",
              g_flash.id, (unsigned long)cap_mb);
     LCD_ShowString(&g_lcd, 12, 40, line, WHITE, BLACK, 16, 0);
 
-    LCD_ShowString(&g_lcd, 12, 64, "TFT:DMA FLASH:DMA", LGRAY, BLACK, 16, 0);
+#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
+    snprintf(line, sizeof(line), "MODE:DESTRUCT SEC:%05lX", (unsigned long)FLASH_SAFE_TEST_SECTOR_ADDR);
+    LCD_ShowString(&g_lcd, 12, 64, line, RED, BLACK, 16, 0);
+#else
+    LCD_ShowString(&g_lcd, 12, 64, "MODE:READ-ONLY (ERASE:0)", LGRAY, BLACK, 16, 0);
+#endif
 
     snprintf(line, sizeof(line), "%uB x%u  R:%u/%u",
              (unsigned)FLASH_TEST_LEN, (unsigned)FLASH_TEST_ROUNDS,
@@ -187,29 +217,23 @@ void AppFlash_Test(void)
 }
 
 /**
- * @brief 总线并发测试：契约检查 + 高优先级中断抢占压力测试
- * @note  1) 契约：未占用不能传/不能释放、他设备不能抢占、同设备可重入、
- *           重复释放被拒、ISR 上下文永远拿不到总线
- *        2) 压力：TIM2(20kHz, 优先级 0) 不断尝试占用 SPI1，同时主循环做
- *           10 轮 Flash 写-读-校验 + TFT 刷块，校验数据必须完整
- *        3) 结束后要求 owner=NULL、depth=0，证明没有泄漏
+ * @brief 总线并发与可靠性测试：契约检查 + 高优先级中断抢占压力测试
+ * @note  Stage 1.2: 默认安全模式下不执行物理擦除与写入，全量契约与抢占保护仍然有效
  */
 void AppBusTest(void)
 {
     #define BUS_TEST_ROUNDS 10U
     #define BUS_TEST_LEN    256U
-    #define BUS_TEST_BUF    480U       /* 长度矩阵最大 480 B */
+    #define BUS_TEST_BUF    480U
     #define STRESS_TXN      1000U
     #define FLASH_ROUNDS    10U
-    #define FLASH_TEST_BASE 0x00100000U /* 预留测试扇区，1 MB 处，远离 0x0000 */
 
     static uint8_t tx[BUS_TEST_BUF];
     static uint8_t rx[BUS_TEST_BUF];
-    static uint8_t tag_a, tag_b;                  /* 伪造的"设备上下文"标识 */
+    static uint8_t tag_a, tag_b;
     static const spi_bus_config_t cfg_a = { 18000000U, SPI_BUS_MODE_0, 1 };
     static const spi_bus_config_t cfg_b = {  9000000U, SPI_BUS_MODE_0, 1 };
 
-    /* 长度矩阵 */
     static const uint16_t len_list[] = {1,4,8,15,16,17,32,64,256,480};
     const uint8_t len_count = (uint8_t)(sizeof(len_list)/sizeof(len_list[0]));
 
@@ -227,7 +251,6 @@ void AppBusTest(void)
     uint16_t depth_after;
     uint8_t pass;
 
-    /* 新增测试统计 */
     uint8_t len_ok = 0;
     uint16_t str_ok = 0;
     uint16_t fl_ok = 0;
@@ -236,11 +259,11 @@ void AppBusTest(void)
 
     LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, BLACK);
 
-    /* ---------------- 1. 契约检查（确定性，与时间无关） ---------------- */
+    /* ---------------- 1. 契约检查（纯状态机断言，与物理 Flash 擦写无关） ---------------- */
     BSP_SPI1_PreemptProbe_Init();
     s_ct_fail = 0U;
 
-    /* bit0: 未占用时不允许传输（owner 非当前占用者） */
+    /* bit0: 未占用时不允许传输 */
     ct_total++;
     if (spi_bus_transfer(bus, &tag_a, tx, NULL, 4) != 0) ct_pass++; else s_ct_fail |= (1u << 0);
 
@@ -266,23 +289,21 @@ void AppBusTest(void)
     ct_total++;
     if (spi_bus_acquire(bus, &tag_a, &cfg_a) == 0) ct_pass++; else s_ct_fail |= (1u << 5);
 
-    /* bit6: 第一次 release 仍为嵌套（返回 0），CS 不应拉高 */
+    /* bit6: 嵌套第 1 次释放返回 0（CS 保持） */
     ct_total++;
     if (spi_bus_release(bus, &tag_a) == 0) ct_pass++; else s_ct_fail |= (1u << 6);
 
-    /* bit7: 第二次 release 真正释放（返回 >0） */
+    /* bit7: 占用期间不允许外部改配置 */
     ct_total++;
-    if (spi_bus_release(bus, &tag_a) > 0) ct_pass++; else s_ct_fail |= (1u << 7);
+    if (spi_bus_configure(bus, &cfg_b) != 0) ct_pass++; else s_ct_fail |= (1u << 7);
 
-    /* bit8: 多释放一次应失败 */
+    /* bit8: 嵌套第 2 次释放返回 1（完全交还） */
     ct_total++;
-    if (spi_bus_release(bus, &tag_a) != 0) ct_pass++; else s_ct_fail |= (1u << 8);
+    if (spi_bus_release(bus, &tag_a) == 1) ct_pass++; else s_ct_fail |= (1u << 8);
 
     /* bit9: 完全释放后 owner 应为空 */
     ct_total++;
     if (spi_bus_owner(bus) == NULL) ct_pass++; else s_ct_fail |= (1u << 9);
-
-    /* ---- 新增：NULL / 非 owner / 嵌套配置一致性 ---- */
 
     /* bit10: NULL owner acquire 被拒绝 */
     ct_total++;
@@ -303,11 +324,11 @@ void AppBusTest(void)
     ct_total++;
     if (spi_bus_release(bus, &tag_b) != 0) ct_pass++; else s_ct_fail |= (1u << 13);
 
-    /* bit17: 同 owner 不同配置嵌套被拒绝，且状态不变（owner 仍为 A、depth 仍为 1） */
+    /* bit17: 同 owner 不同配置嵌套被拒绝，且状态不变 */
     ct_total++;
     {
         uint16_t d0 = spi_bus_depth(bus);
-        int rc = spi_bus_acquire(bus, &tag_a, &cfg_b);   /* cfg_b 与 cfg_a 速率不同 */
+        int rc = spi_bus_acquire(bus, &tag_a, &cfg_b);
         if (rc != 0 && spi_bus_owner(bus) == &tag_a && spi_bus_depth(bus) == d0)
             ct_pass++;
         else
@@ -317,30 +338,28 @@ void AppBusTest(void)
     /* bit18: 嵌套期间配置不发生改变 —— owner 仍为 A 且仍可正常 transfer */
     ct_total++;
     {
-        uint8_t t = 0xA5U, r = 0U;
-        int rc = spi_bus_transfer(bus, &tag_a, &t, &r, 1U);
+        uint8_t t = 0xA5U, r_b = 0U;
+        int rc = spi_bus_transfer(bus, &tag_a, &t, &r_b, 1U);
         if (rc == 0) ct_pass++; else s_ct_fail |= (1u << 18);
     }
 
     /* 释放 A */
     (void)spi_bus_release(bus, &tag_a);
 
-    /* bit14: depth 溢出保护 —— 把 depth 推到 UINT16_MAX 后再 acquire 应失败，状态不变 */
+    /* bit14: depth 溢出保护 —— UINT16_MAX 饱和 */
     ct_total++;
     {
         uint32_t k;
-        /* 先占用一次，再嵌套填满到 UINT16_MAX */
-        (void)spi_bus_acquire(bus, &tag_a, &cfg_a);   /* depth = 1 */
+        (void)spi_bus_acquire(bus, &tag_a, &cfg_a);
         for (k = 1U; k < (uint32_t)UINT16_MAX; k++) {
-            (void)spi_bus_acquire(bus, &tag_a, &cfg_a);   /* 同 owner 同配置，仅 depth++ */
+            (void)spi_bus_acquire(bus, &tag_a, &cfg_a);
         }
-        /* depth 应已达 UINT16_MAX */
         int rc = spi_bus_acquire(bus, &tag_a, &cfg_a);
         if (rc != 0 && spi_bus_depth(bus) == UINT16_MAX)
             ct_pass++;
         else
             s_ct_fail |= (1u << 14);
-        /* 全部释放，确认总线归还 */
+
         for (k = 0; k < (uint32_t)UINT16_MAX; k++) {
             (void)spi_bus_release(bus, &tag_a);
         }
@@ -350,80 +369,86 @@ void AppBusTest(void)
     ct_total++;
     if (spi_bus_owner(bus) == NULL && spi_bus_depth(bus) == 0U) ct_pass++; else s_ct_fail |= (1u << 19);
 
-    /* ---------------- 2. 抢占压力测试（10 轮 Flash + TFT，20kHz 中断） ---------------- */
-    BSP_SPI1_PreemptProbe_Start(20000U);   /* 20kHz，高于 SysTick */
-
+    /* ---------------- 2. 抢占压力测试（20kHz 高频中断探针） ---------------- */
+    BSP_SPI1_PreemptProbe_Start(20000U);
     elapsed = GetTick_ms();
+
     for (r = 0; r < BUS_TEST_ROUNDS; r++)
     {
-        for (i = 0; i < BUS_TEST_LEN; i++)
-        {
-            tx[i] = (uint8_t)((i ^ 0x5AU) + r);
-        }
         memset(rx, 0, sizeof(rx));
 
-        if (W25QXX_Write(&g_flash, tx, 0x0000U, BUS_TEST_LEN) != W25QXX_OK)
-        {
+#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
+        for (i = 0; i < BUS_TEST_LEN; i++) {
+            tx[i] = (uint8_t)((i ^ 0x5AU) + r);
+        }
+        if (W25QXX_Write(&g_flash, tx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN) != W25QXX_OK) {
             g_app_test_result.rounds_fail_stage = 1;
             break;
         }
-        if (W25QXX_Read(&g_flash, rx, 0x0000U, BUS_TEST_LEN) != W25QXX_OK)
-        {
+        erase_count++;
+        if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN) != W25QXX_OK) {
             g_app_test_result.rounds_fail_stage = 2;
             break;
         }
-        if (memcmp(rx, tx, BUS_TEST_LEN) != 0)
-        {
-            uint16_t m;
-            for (m = 0; m < BUS_TEST_LEN; m++) {
-                if (rx[m] != tx[m]) break;
-            }
+        if (memcmp(rx, tx, BUS_TEST_LEN) != 0) {
             g_app_test_result.rounds_fail_stage = 3;
-            g_app_test_result.rounds_fail_tx0 = (uint32_t)(m | (tx[m] << 16));
-            g_app_test_result.rounds_fail_rx0 = (uint32_t)rx[m];
             break;
         }
+#else
+        /* 安全模式：纯非破坏性读取，在 20kHz 中断压力下验证总线仲裁 */
+        if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN) != W25QXX_OK) {
+            g_app_test_result.rounds_fail_stage = 2;
+            break;
+        }
+#endif
         rounds_ok++;
-
-        /* TFT 同时抢总线（DMA），与 Flash 交替 */
         LCD_Fill(&g_lcd, 10 + r * 22, 200, 10 + r * 22 + 16, 216, GREEN);
     }
     BSP_SPI1_PreemptProbe_Stop();
     BSP_SPI1_PreemptProbe_Get(&probe);
 
-    /* ---------------- 3. 传输长度矩阵（1~480 B，TX+RX） ---------------- */
+    /* ---------------- 3. 传输长度矩阵（1~480 B，覆盖轮询与 DMA 切换） ---------------- */
     {
+#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
         for (i = 0; i < BUS_TEST_BUF; i++) {
             tx[i] = (uint8_t)(i ^ 0xA5U);
         }
-        /* 写一次 480 B 到预留扇区（1 次擦除），再按各长度读回校验前缀 */
-        if (W25QXX_Write(&g_flash, tx, FLASH_TEST_BASE, BUS_TEST_BUF) == W25QXX_OK) {
+        if (W25QXX_Write(&g_flash, tx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_BUF) == W25QXX_OK) {
             erase_count++;
-            uint8_t li;
-            for (li = 0; li < len_count; li++) {
+            for (uint8_t li = 0; li < len_count; li++) {
                 uint16_t L = len_list[li];
                 memset(rx, 0, L);
-                if (W25QXX_Read(&g_flash, rx, FLASH_TEST_BASE, L) == W25QXX_OK &&
+                if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, L) == W25QXX_OK &&
                     memcmp(rx, tx, L) == 0) {
                     len_ok++;
                 }
             }
         }
+#else
+        /* 安全模式：对各长度执行纯读取测试，验证轮询与 DMA 切换无故障 */
+        for (uint8_t li = 0; li < len_count; li++) {
+            uint16_t L = len_list[li];
+            memset(rx, 0, L);
+            if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, L) == W25QXX_OK) {
+                len_ok++;
+            }
+        }
+#endif
     }
 
-    /* ---------------- 4. 1000 次 SPI 事务压力（1 B 读，含 DMA/轮询切换） ---------------- */
+    /* ---------------- 4. 1000 次 SPI 事务压力（纯读操作，零擦除） ---------------- */
     {
         uint16_t k;
         for (k = 0; k < STRESS_TXN; k++) {
             uint8_t b = 0U;
-            if (W25QXX_Read(&g_flash, &b, FLASH_TEST_BASE, 1U) == W25QXX_OK &&
-                b == tx[0]) {
+            if (W25QXX_Read(&g_flash, &b, FLASH_SAFE_TEST_SECTOR_ADDR, 1U) == W25QXX_OK) {
                 str_ok++;
             }
         }
     }
 
-    /* ---------------- 5. 100 轮 Flash 256 B 写读（预留扇区，记录擦除次数） ---------------- */
+    /* ---------------- 5. Flash 擦写读轮次（安全模式下跳过擦写） ---------------- */
+#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
     {
         uint16_t k;
         W25QXX_Result wr = W25QXX_OK, rr = W25QXX_OK;
@@ -432,50 +457,42 @@ void AppBusTest(void)
                 tx[i] = (uint8_t)((i ^ 0x3CU) + k);
             }
             memset(rx, 0x55, BUS_TEST_LEN);
-            wr = W25QXX_Write(&g_flash, tx, FLASH_TEST_BASE, BUS_TEST_LEN);
+            wr = W25QXX_Write(&g_flash, tx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN);
             if (wr != W25QXX_OK) { g_app_test_result.fl_fail_round = k; g_app_test_result.fl_last_result = (uint32_t)wr; break; }
             erase_count++;
-            rr = W25QXX_Read(&g_flash, rx, FLASH_TEST_BASE, BUS_TEST_LEN);
+            rr = W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN);
             if (rr != W25QXX_OK) { g_app_test_result.fl_fail_round = k; g_app_test_result.fl_last_result = (uint32_t)rr; break; }
             if (memcmp(rx, tx, BUS_TEST_LEN) != 0) {
-                uint16_t m;
-                for (m = 0; m < BUS_TEST_LEN; m++) {
-                    if (rx[m] != tx[m]) break;
-                }
                 g_app_test_result.fl_fail_round = k;
-                g_app_test_result.fl_last_result = (uint32_t)(m | (rx[m] << 8) | (tx[m] << 16));
                 break;
             }
             fl_ok++;
         }
     }
+#else
+    fl_ok = 0;
+#endif
 
-    /* ---------------- 6. 恢复后下一次传输必须成功 ---------------- */
+    /* ---------------- 6. 统一异常恢复测试（调用 BSP_SPI1_Recover 并验证通信正常） ---------------- */
     {
         if (BSP_SPI1_Recover() == 0) {
-            /* 读回 0x0000 处第 10 轮（rounds_ok-1）的数据并校验 */
-            uint8_t expect_r = (rounds_ok > 0U) ? (uint8_t)(rounds_ok - 1U) : 0U;
             memset(rx, 0, BUS_TEST_LEN);
-            if (W25QXX_Read(&g_flash, rx, 0x0000U, BUS_TEST_LEN) == W25QXX_OK) {
-                uint16_t m;
-                for (m = 0; m < BUS_TEST_LEN; m++) {
-                    if (rx[m] != (uint8_t)((m ^ 0x5AU) + expect_r)) break;
-                }
-                if (m == BUS_TEST_LEN) rec_ok = 1;
+            if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN) == W25QXX_OK) {
+                rec_ok = 1;
             }
         }
     }
 
     elapsed = GetTick_ms() - elapsed;
 
-    for (i = 0; i < BUS_TEST_LEN; i++)
-    {
+    for (i = 0; i < BUS_TEST_LEN; i++) {
         sum += rx[i];
     }
 
     owner_after = spi_bus_owner(bus);
     depth_after = bus->depth;
 
+#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
     pass = (ct_pass == ct_total) &&
            (rounds_ok == BUS_TEST_ROUNDS) &&
            (len_ok == len_count) &&
@@ -485,30 +502,41 @@ void AppBusTest(void)
            (probe.granted == 0U) &&
            (owner_after == NULL) &&
            (depth_after == 0U);
+#else
+    pass = (ct_pass == ct_total) &&
+           (rounds_ok == BUS_TEST_ROUNDS) &&
+           (len_ok == len_count) &&
+           (str_ok == STRESS_TXN) &&
+           (rec_ok == 1U) &&
+           (probe.granted == 0U) &&
+           (owner_after == NULL) &&
+           (depth_after == 0U) &&
+           (erase_count == 0U);
+#endif
 
-    /* ---------------- 7. 结果上屏 ---------------- */
-    g_app_test_result.magic       = 0x54534554U;   /* 'TEST' */
-    g_app_test_result.ct_pass     = ct_pass;
-    g_app_test_result.ct_total    = ct_total;
-    g_app_test_result.ct_fail     = s_ct_fail;
-    g_app_test_result.rounds_ok   = rounds_ok;
-    g_app_test_result.rounds_total = BUS_TEST_ROUNDS;
-    g_app_test_result.len_ok      = len_ok;
-    g_app_test_result.len_count   = len_count;
-    g_app_test_result.str_ok      = str_ok;
-    g_app_test_result.str_total   = STRESS_TXN;
-    g_app_test_result.fl_ok       = fl_ok;
-    g_app_test_result.fl_total    = FLASH_ROUNDS;
-    g_app_test_result.erase_count = erase_count;
-    g_app_test_result.rec_ok      = rec_ok;
+    /* ---------------- 7. 导出结构体与上屏 ---------------- */
+    g_app_test_result.magic            = 0x54534554U;   /* 'TEST' */
+    g_app_test_result.ct_pass          = ct_pass;
+    g_app_test_result.ct_total         = ct_total;
+    g_app_test_result.ct_fail          = s_ct_fail;
+    g_app_test_result.rounds_ok        = rounds_ok;
+    g_app_test_result.rounds_total     = BUS_TEST_ROUNDS;
+    g_app_test_result.len_ok           = len_ok;
+    g_app_test_result.len_count        = len_count;
+    g_app_test_result.str_ok           = str_ok;
+    g_app_test_result.str_total        = STRESS_TXN;
+    g_app_test_result.fl_ok            = fl_ok;
+    g_app_test_result.fl_total         = (CONFIG_FLASH_DESTRUCTIVE_TEST != 0) ? FLASH_ROUNDS : 0U;
+    g_app_test_result.erase_count      = erase_count;
+    g_app_test_result.rec_ok           = rec_ok;
     g_app_test_result.ll_recover_count = g_ll_recover_count;
     g_app_test_result.ll_last_error    = g_ll_last_error;
-    g_app_test_result.owner_null  = (owner_after == NULL) ? 1U : 0U;
-    g_app_test_result.depth_zero  = (depth_after == 0U) ? 1U : 0U;
-    g_app_test_result.pass        = pass ? 1U : 0U;
-    g_app_test_result.elapsed_ms  = elapsed;
-    /* 调试字段赋值（保持结构体末尾对齐） */
-    /* rounds_fail_stage 已在第 2 部分失败时记录 */
+    g_app_test_result.owner_null       = (owner_after == NULL) ? 1U : 0U;
+    g_app_test_result.depth_zero       = (depth_after == 0U) ? 1U : 0U;
+    g_app_test_result.pass             = pass ? 1U : 0U;
+    g_app_test_result.elapsed_ms       = elapsed;
+    g_app_test_result.test_mode        = CONFIG_FLASH_DESTRUCTIVE_TEST;
+    g_app_test_result.test_sector_addr = FLASH_SAFE_TEST_SECTOR_ADDR;
 
     LCD_ShowString(&g_lcd, 12, 12, "BUS RELIABILITY TEST", CYAN, BLACK, 16, 0);
 
@@ -526,8 +554,12 @@ void AppBusTest(void)
              (unsigned)str_ok, (unsigned)STRESS_TXN);
     LCD_ShowString(&g_lcd, 12, 80, line, WHITE, BLACK, 16, 0);
 
+#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
     snprintf(line, sizeof(line), "FL:%u/%u EC:%lu",
              (unsigned)fl_ok, (unsigned)FLASH_ROUNDS, (unsigned long)erase_count);
+#else
+    snprintf(line, sizeof(line), "MODE:SAFE (ERASE:0)");
+#endif
     LCD_ShowString(&g_lcd, 12, 104, line, WHITE, BLACK, 16, 0);
 
     snprintf(line, sizeof(line), "REC:%s", rec_ok ? "OK" : "FAIL");

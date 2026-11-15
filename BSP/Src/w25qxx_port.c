@@ -54,38 +54,54 @@ static uint8_t s_ff[W25QXX_BULK_CHUNK];
 /* 总线回调实现（驱动通过这些函数访问硬件）                            */
 /* ================================================================================== */
 
-static void W25QXX_Port_CS_Low(void *ctx)
+static int W25QXX_Port_CS_Low(void *ctx)
 {
     W25QXX_PortCtx *p = (W25QXX_PortCtx *)ctx;
 
-    /* 占用总线并切到本设备参数；被其它设备占用时保持 CS 高 */
+    if (p == NULL || p->bus == NULL) {
+        return -1;
+    }
+
+    /* 占用总线并切到本设备参数；被其它设备占用或在 ISR 中时保持 CS 高并返回错误 */
     if (spi_bus_acquire(p->bus, p, &p->cfg) != 0) {
-        return;
+        return -1;
     }
     LL_GPIO_ResetOutputPin(p->cs_port, p->cs_pin);
+    return 0;
 }
 
-static void W25QXX_Port_CS_High(void *ctx)
+static int W25QXX_Port_CS_High(void *ctx)
 {
     W25QXX_PortCtx *p = (W25QXX_PortCtx *)ctx;
+
+    if (p == NULL || p->bus == NULL) {
+        return -1;
+    }
 
     /* 仅当本次 release 真正交还总线才拉高 CS；嵌套期间 CS 保持有效 */
-    if (spi_bus_release(p->bus, p) > 0) {
+    int rel = spi_bus_release(p->bus, p);
+    if (rel > 0) {
         LL_GPIO_SetOutputPin(p->cs_port, p->cs_pin);
         Delay_us(10); /* 保证 Flash tSHSL 片选释放恢复时间与写操作锁存就绪 */
+        return 0;
     }
+    return (rel == 0) ? 0 : -1;
 }
 
-static uint8_t W25QXX_Port_Swap(void *ctx, uint8_t tx)
+static int W25QXX_Port_Swap(void *ctx, uint8_t tx, uint8_t *rx)
 {
     W25QXX_PortCtx *p = (W25QXX_PortCtx *)ctx;
-    uint8_t rx = 0xFFU;
+    uint8_t dummy = 0xFFU;
+    uint8_t *rx_buf = (rx != NULL) ? rx : &dummy;
 
     /* 只有本设备仍持有总线时才收发 */
-    if (spi_bus_owner(p->bus) == p) {
-        (void)spi_bus_transfer(p->bus, p, &tx, &rx, 1U);
+    if (p == NULL || p->bus == NULL || spi_bus_owner(p->bus) != p) {
+        return -1;
     }
-    return rx;
+    if (spi_bus_transfer(p->bus, p, &tx, rx_buf, 1U) != 0) {
+        return -1;
+    }
+    return 0;
 }
 
 static uint32_t W25QXX_Port_Millis(void *ctx)
@@ -95,21 +111,21 @@ static uint32_t W25QXX_Port_Millis(void *ctx)
 }
 
 /* 读数据段：发送 0xFF 哑元同时接收，长度超过阈值时由总线切到 DMA */
-static int W25QXX_Port_ReadBulk(void *ctx, uint8_t *rx, uint16_t len)
+static int W25QXX_Port_ReadBulk(void *ctx, uint8_t *rx, uint32_t len)
 {
     W25QXX_PortCtx *p = (W25QXX_PortCtx *)ctx;
-    uint16_t done = 0;
+    uint32_t done = 0;
 
-    if (rx == NULL || spi_bus_owner(p->bus) != p) {
+    if (rx == NULL || p == NULL || p->bus == NULL || spi_bus_owner(p->bus) != p) {
         return -1;
     }
 
     while (done < len) {
-        uint16_t n = (uint16_t)(len - done);
+        uint32_t n = len - done;
         if (n > W25QXX_BULK_CHUNK) {
             n = W25QXX_BULK_CHUNK;
         }
-        if (spi_bus_transfer(p->bus, p, s_ff, rx + done, n) != 0) {
+        if (spi_bus_transfer(p->bus, p, s_ff, rx + done, (uint16_t)n) != 0) {
             return -1;
         }
         done += n;
@@ -118,11 +134,11 @@ static int W25QXX_Port_ReadBulk(void *ctx, uint8_t *rx, uint16_t len)
 }
 
 /* 写数据段：只发不收 */
-static int W25QXX_Port_WriteBulk(void *ctx, const uint8_t *tx, uint16_t len)
+static int W25QXX_Port_WriteBulk(void *ctx, const uint8_t *tx, uint32_t len)
 {
     W25QXX_PortCtx *p = (W25QXX_PortCtx *)ctx;
 
-    if (tx == NULL || spi_bus_owner(p->bus) != p) {
+    if (tx == NULL || p == NULL || p->bus == NULL || spi_bus_owner(p->bus) != p) {
         return -1;
     }
     return spi_bus_transfer(p->bus, p, tx, NULL, len);
@@ -130,13 +146,13 @@ static int W25QXX_Port_WriteBulk(void *ctx, const uint8_t *tx, uint16_t len)
 
 /* 交给驱动的抽象总线（生命周期覆盖整个运行期） */
 static const W25QXX_Bus s_w25qxx_bus = {
-    W25QXX_Port_CS_Low,
-    W25QXX_Port_CS_High,
-    W25QXX_Port_Swap,
-    W25QXX_Port_Millis,
-    &s_ctx,
-    W25QXX_Port_ReadBulk,
-    W25QXX_Port_WriteBulk
+    .cs_low     = W25QXX_Port_CS_Low,
+    .cs_high    = W25QXX_Port_CS_High,
+    .swap       = W25QXX_Port_Swap,
+    .millis     = W25QXX_Port_Millis,
+    .ctx        = &s_ctx,
+    .read_bulk  = W25QXX_Port_ReadBulk,
+    .write_bulk = W25QXX_Port_WriteBulk
 };
 
 /* ================================================================================== */
