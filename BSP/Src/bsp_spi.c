@@ -163,3 +163,8 @@ void TIM2_IRQHandler(void)
         (void)spi_bus_release(s_probe_bus, &s_probe_owner);
     }
 }
+
+int BSP_SPI1_Recover(void)
+{
+    return spi_stm32_ll_recover(&s_spi1);
+}

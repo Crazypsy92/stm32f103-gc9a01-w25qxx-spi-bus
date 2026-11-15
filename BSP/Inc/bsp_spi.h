@@ -43,4 +43,11 @@ void BSP_SPI1_PreemptProbe_Inject(void);
 /** @brief 读取统计 */
 void BSP_SPI1_PreemptProbe_Get(bsp_spi_probe_t *out);
 
+/**
+ * @brief  板级 SPI 恢复入口（测试/故障用）
+ * @return 0 成功，负值失败
+ * @note   调用 spi_stm32_ll_recover，不触碰任何 CS；供恢复测试使用。
+ */
+int BSP_SPI1_Recover(void);
+
 #endif /* __BSP_SPI_H__ */

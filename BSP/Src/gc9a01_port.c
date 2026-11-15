@@ -59,8 +59,11 @@ static void Port_Cs(void *ctx, uint8_t level)
         }
         LL_GPIO_ResetOutputPin(GC9A01_CS_PORT, GC9A01_CS_PIN);
     } else {
-        LL_GPIO_SetOutputPin(GC9A01_CS_PORT, GC9A01_CS_PIN);
-        (void)spi_bus_release(hw->bus, hw);
+        /* 仅当本次 release 真正交还总线（depth 归零）才拉高 CS；
+           嵌套事务未结束时 CS 必须保持有效，避免提前结束当前命令 */
+        if (spi_bus_release(hw->bus, hw) > 0) {
+            LL_GPIO_SetOutputPin(GC9A01_CS_PORT, GC9A01_CS_PIN);
+        }
     }
 }
 
@@ -90,7 +93,7 @@ static void Port_Write(void *ctx, const uint8_t *buf, uint16_t len)
 
     /* 只有本设备仍持有总线时才发送，防止写进别人的事务 */
     if (spi_bus_owner(hw->bus) == hw) {
-        (void)spi_bus_transfer(hw->bus, buf, NULL, len);
+        (void)spi_bus_transfer(hw->bus, hw, buf, NULL, len);
     }
 }
 

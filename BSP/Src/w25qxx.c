@@ -68,7 +68,7 @@ static W25QXX_Result W25QXX_WaitBusy(W25QXX_Device *dev, uint32_t timeout_ms)
         status = W25_SPI_Swap(dev, 0xFF);
         W25_CS_HIGH(dev);
 
-        if ((status & 0x01) == 0) {
+        if ((status & 0x01U) == 0U) {
             return W25QXX_OK;
         }
 
@@ -78,6 +78,8 @@ static W25QXX_Result W25QXX_WaitBusy(W25QXX_Device *dev, uint32_t timeout_ms)
             W25_LOG("[W25Qxx] WaitBusy timeout (%lu ms)\r\n", (unsigned long)timeout_ms);
             return W25QXX_ERROR_TIMEOUT;
         }
+
+        Delay_us(50);
     }
 }
 
@@ -85,9 +87,22 @@ static W25QXX_Result W25QXX_WaitBusy(W25QXX_Device *dev, uint32_t timeout_ms)
  * @brief  内部函数：写使能 (WEL)
  */
 static void W25QXX_WriteEnable(W25QXX_Device *dev) {
-    W25_CS_LOW(dev);
-    W25_SPI_Swap(dev, W25X_WriteEnable);
-    W25_CS_HIGH(dev);
+    for (uint8_t retries = 0; retries < 5; retries++) {
+        W25_CS_LOW(dev);
+        W25_SPI_Swap(dev, W25X_WriteEnable);
+        W25_CS_HIGH(dev);
+
+        /* 验证 WEL 是否已锁存 */
+        W25_CS_LOW(dev);
+        W25_SPI_Swap(dev, W25X_ReadStatusReg);
+        uint8_t st = W25_SPI_Swap(dev, 0xFF);
+        W25_CS_HIGH(dev);
+
+        if ((st & 0x02U) != 0U) {
+            break;
+        }
+        Delay_us(20);
+    }
 }
 
 /**
@@ -227,6 +242,8 @@ static W25QXX_Result W25QXX_Write_Page(W25QXX_Device *dev, const uint8_t *pBuffe
     }
 
     W25_CS_HIGH(dev);
+    /* 等待页编程周期（tPP 典型 0.7ms，最大 3ms），避免过早拉低 CS 破坏编程 */
+    Delay_ms(3);
 
     if (bulk_ret != 0) {
         return W25_Return(dev, W25QXX_ERROR_BUS);
@@ -289,6 +306,8 @@ W25QXX_Result W25QXX_EraseSector(W25QXX_Device *dev, uint32_t SectorAddr)
     W25_SPI_Swap(dev, (uint8_t)((SectorAddr) >> 8));
     W25_SPI_Swap(dev, (uint8_t)SectorAddr);
     W25_CS_HIGH(dev);
+    /* 等待扇区擦除主要周期（典型 45ms，最大 400ms），避免过早轮询 */
+    Delay_ms(40);
 
     return W25_Return(dev, W25QXX_WaitBusy(dev, W25QXX_ERASE_TIMEOUT_MS));
 }

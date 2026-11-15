@@ -10,6 +10,19 @@
 #include "stm32f1xx_ll_spi.h"
 #include "spi_bus.h"
 
+/**
+ * @brief LL 层统一状态码
+ * @note  全部为非正值，可直接作为 spi_bus_transfer 的返回值透传
+ */
+typedef enum {
+    SPI_LL_OK             = 0,   /**< 成功 */
+    SPI_LL_ERROR_PARAM    = -1,  /**< 参数非法 */
+    SPI_LL_ERROR_TIMEOUT  = -2,  /**< 等待超时 */
+    SPI_LL_ERROR_DMA      = -3,  /**< DMA 传输错误（TEIF） */
+    SPI_LL_ERROR_BUSY     = -4,  /**< 外设正忙，无法配置 */
+    SPI_LL_ERROR_RECOVERY = -5,  /**< 异常恢复失败 */
+} spi_ll_status_t;
+
 /** @brief STM32 SPI 硬件描述（板级填写） */
 typedef struct {
     SPI_TypeDef  *periph;      /* SPI1 / SPI2 */
@@ -43,5 +56,12 @@ void spi_stm32_ll_init(spi_stm32_ll_t *ll, const spi_stm32_ll_hw_t *hw);
 
 /** @brief 获取抽象总线句柄 */
 spi_bus_t *spi_stm32_ll_bus(spi_stm32_ll_t *ll);
+
+/**
+ * @brief  测试/恢复用：把 SPI/DMA 拉回可用态（与错误路径同一清理逻辑）
+ * @return spi_ll_status_t（0 成功，负值失败）
+ * @note   不操作任何 CS 引脚；供异常恢复测试或故障后手动恢复调用。
+ */
+int spi_stm32_ll_recover(spi_stm32_ll_t *ll);
 
 #endif /* __SPI_STM32_LL_H__ */

@@ -1,5 +1,6 @@
 # 构建产物
 build/
+tests/host/build/
 *.o
 *.d
 *.elf
@@ -10,3 +11,4 @@ build/
 # 编辑器 / IDE 本地文件
 .settings/
 .cache/
+.trae/

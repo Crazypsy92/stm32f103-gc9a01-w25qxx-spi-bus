@@ -108,15 +108,16 @@ arm-none-eabi-gdb build/Debug/gc9a01.elf -ex "target remote :3333"
 
 1. **屏幕自测**：红 → 绿 → 蓝全屏（各 300 ms）→ 顶部 6 条色带 → 文字 `GC9A01 OK` / `240x240 SPI1` / 引脚信息 → 白框 + 品红圆
 2. **双 DMA 测试**：`TFT+FLASH DMA TEST`，显示 `ID:EF17 CAP:16MB`、`256B x3 R:3/3`、`PASS`，并画出 3 个绿色方块
-3. **总线并发测试**：`BUS CONCURRENCY TEST`，正常结果：
+3. **总线可靠性测试**：`BUS RELIABILITY TEST`，正常结果：
 
 ```
-CT:10/10 G:0 E:0000
-IRQ:12500 HIT:9593
-W/R:10/10 SUM:xxxx
+CT:18/18 G:0 E:00000
+IRQ:xxxxx HIT:xxxxx
+LEN:10/10  STR:1000/1000
+FL:10/10 EC:11
+REC:OK
 OWNER:NULL DEPTH:0
-TFT:DMA FLASH:DMA
-PASS xxxms
+PASS 1012ms
 ```
 
 4. 之后进入主循环：屏幕右下角 24×12 方块每 500 ms 红/黑翻转（心跳）
@@ -125,11 +126,15 @@ PASS xxxms
 
 | 字段 | 正常 | 异常含义 |
 |---|---|---|
-| `CT` | 10/10 | 少一项看 `E` 位图：bit0~bit9 对应 README 中契约顺序 |
+| `CT` | 18/18 | 少一项看 `E` 位图：bit0~bit19 对应契约检查项 |
 | `G` | 0 | 非 0 表示中断成功抢到了总线（ISR 保护失效） |
-| `HIT` | 接近 `IRQ` | 太低说明压力测试没压在事务中间 |
-| `W/R` | 10/10 | 读写校验失败的轮数 |
-| `OWNER` | NULL | `LEFT` 表示有设备忘了释放总线 |
+| `HIT` | 接近 `IRQ` | 记录高优先级探针中断落在主循环事务执行正中间的次数 |
+| `LEN` | 10/10 | 1~480 字节传输长度矩阵逐字节比对结果 |
+| `STR` | 1000/1000 | 1000 次连续高频 SPI 事务压力测试通过次数 |
+| `FL` | 10/10 | Flash 扇区擦除 + 页编程 + 读回校验轮数；`EC` 为累计擦除次数 |
+| `REC` | OK | 统一异常恢复与热重启后再次通信校验结果 |
+| `OWNER` | NULL | `LEFT` 表示有设备未释放总线 |
+| `DEPTH` | 0 | 非 0 表示嵌套释放与申请不平衡 |
 
 ## 6. 在自己的代码里使用
 

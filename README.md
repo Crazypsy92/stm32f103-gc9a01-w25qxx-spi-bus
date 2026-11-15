@@ -78,18 +78,23 @@ bsp_spi.c                               SPI1 单例（BSP_SPI1_GetBus）+ TIM2 �
 | 接口 / 字段 | 说明 |
 |---|---|
 | `spi_bus_config_t` | `clock_hz`（目标 SCLK）+ `mode`（0~3）+ `use_dma` |
-| `spi_bus_acquire(bus, owner, cfg)` | 占用总线并切到本设备参数；被他人占用或在 ISR 中调用返回 `-1` |
-| `spi_bus_release(bus, owner)` | 释放；仅占用者本人可调用，支持同 owner 嵌套计数 |
+| `spi_bus_acquire(bus, owner, cfg)` | 占用总线并切到本设备参数；被他人占用或在 ISR 中调用返回 `-1`；同 owner 嵌套时仅增加 depth（不重新配置外设，要求参数严格一致） |
+| `spi_bus_release(bus, owner)` | 释放总线；仅占用者本人可调用；返回 `1` 表示完全释放（Port 层可拉高片选 CS），返回 `0` 表示仍处于嵌套事务中（CS 保持有效），返回 `-1` 表示非法调用 |
 | `spi_bus_owner(bus)` | 查询当前占用者，空闲返回 `NULL` |
-| `spi_bus_transfer(bus, tx, rx, len)` | 全双工传输；未 acquire 直接返回 `-1`；`rx` 可为 `NULL` |
-| `bus->owner / depth / rejects` | 占用者 / 重入深度 / 被拒绝次数（调试与测试用） |
-| `ops->in_isr(bus)` | 可选：实现方上报是否处于中断上下文 |
+| `spi_bus_transfer(bus, owner, tx, rx, len)` | 全双工传输；必须传入调用者 `owner`；非持有者或未 acquire 直接返回 `-1`；`rx` 可为 `NULL` |
+| `bus->owner / depth / rejects` | 占用者 / 重入深度（最大 `UINT16_MAX` 饱和防溢出） / 被拒绝次数 |
+| `ops->in_isr(bus)` | 实现方上报是否处于中断上下文（Cortex-M3 `__get_IPSR() != 0`） |
+| `BSP_SPI1_Recover()` | 统一异常恢复：复位 DMA 请求/通道、清标志与 OVR、排空 RX、重载配置 |
 
 关键设计：
 
-- **owner 用设备上下文指针本身充当身份**（`&s_hw` / `&s_ctx`），不需要额外的 ID 分配，也不可能重复。
-- **同一 owner 可重入**（`depth++`），只有深度归零才真正释放，方便在一个事务里连续调用多个绘图函数。
-- **`rejects` 只增不减**，测试里用它判断"是否有抢占被挡住"。
+- **owner 用设备上下文指针充当强类型身份**（`&s_hw` / `&s_ctx`），杜绝未经授权的跨设备或旁路数据注入。
+- **同一 owner 安全嵌套**（`depth++`），必须参数一致且绝不重复配置底层外设；仅最外层 release 才拉高物理片选。
+- **状态不变量守卫**：始终满足 `(owner == NULL) <=> (depth == 0)`，防止非法状态漂移。
+- **详细方案与验收文档**：
+  - [Stage 1 整改方案与设计文档](docs/stage1_spi_reliability_plan.md)
+  - [Stage 1 测试报告 (Host + HIL)](docs/stage1_spi_reliability_test_report.md)
+  - [Stage 1 验收清单](docs/stage1_spi_reliability_acceptance.md)
 
 ## 5. 并发模型（使用前必须理解）
 
@@ -97,17 +102,21 @@ bsp_spi.c                               SPI1 单例（BSP_SPI1_GetBus）+ TIM2 �
 2. **中断安全**：ISR 里调用 `acquire()` 会被直接拒绝（`spi_stm32_ll.c` 用 `__get_IPSR()` 哨兵）。原因是中断若插进主循环事务中间，会改掉当前速率/模式并重配 DMA 通道。若中断确实要访问 SPI，应把请求排进队列，由主循环统一执行。
 3. **异步 DMA 尚未支持**：当前 `release` 必须在 `transfer()` 返回后立即执行。要改成非阻塞，需把 `release` 挪到"传输完成"回调里，并给 `acquire` 增加忙等待/超时语义。
 
-这三条不是"理论上应该"，而是被 `AppBusTest()` 的 10 项契约检查 + 20 kHz 高优先级中断压力测试覆盖，并在实物上验证过（见 [TEST_REPORT.md](TEST_REPORT.md)）。
+这三条由 `AppBusTest()` 的 **18 项契约检查** + **20 kHz 高优先级中断压力测试** 全量覆盖，并在物理硬件上验证通过（见 [TEST_REPORT.md](TEST_REPORT.md)）。
 
-## 6. DMA 策略
+## 6. DMA 与可靠性策略
 
 | 规则 | 说明 |
 |---|---|
 | 阈值 `SPI_DMA_MIN_LEN = 16` | ≥16 字节走 DMA，小块自动回落轮询（单字节启动 DMA 的开销大于传输本身） |
 | 通道固定 | SPI1_TX→DMA1_Ch3、SPI1_RX→DMA1_Ch2（C8T6 只有 DMA1） |
-| 双缓冲等待 | TX/RX 同时启动，等 TX 完成、RX 完成、再等 SPI 总线空闲（BSY=0）才返回 |
+| 完成与错误判定 | 同时监测 `TCIF` 完成与 `TEIF` 传输错误标志；出现错误立即终止等待并返回 `SPI_LL_ERROR_DMA` |
+| 时序结束保障 | DMA 结束后严格串行等待 `TXE == 1` 和 `BSY == 0`，确认最后一个字节移出后才允许释放片选 |
+| 绝对时钟超时 | 基于 Cortex-M3 `DWT->CYCCNT` 周期计数器实现超时判定，天然处理 32 位回绕，无惧中断抖动 |
+| 自动长度分块 | 针对 STM32F1 DMA 16 位 `CNDTR` 限制，单次传输 $>65535$ 时底层自动切块，分块间 CS 维持连续有效 |
+| 全双工残留与 OVR | 传输前后自动排空 RX 缓冲区并执行清 OVR 序列，避免全双工通信时因 RX 溢出锁死 SPI 外设 |
 | Flash 读 | 命令后按 64 字节分块，用静态 `0xFF` 哑元缓冲喂 TX，边发边收 |
-| Flash 写 | 页写数据段整块交给 `write_bulk`（TX-only DMA） |
+| Flash 写 | 页写数据段整块交给 `write_bulk`（TX-only DMA），拉高 CS 后预留电荷泵建立延迟（$t_{\text{PP}}$ 窗口） |
 | 屏幕 | `gc9a01.c` 的 480 字节行缓冲作为 DMA 源，`LCD_Fill` 按行发送 |
 | 冲突规避 | 两个设备争用同一组通道，但事务是阻塞且互斥的，通道不会在传输中被改配 |
 
