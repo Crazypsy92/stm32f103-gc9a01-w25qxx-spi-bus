@@ -10,21 +10,71 @@
             "cacheVariables": {}
         },
         {
-            "name": "Debug",
+            "name": "dual-debug",
             "inherits": "default",
+            "description": "Dual SPI mode with interactive demo (Debug build)",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug"
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CONFIG_DUAL_SPI": true,
+                "CONFIG_HIL_TESTS": false
             }
         },
         {
-            "name": "Release",
+            "name": "dual-release",
             "inherits": "default",
+            "description": "Dual SPI mode with interactive demo (Release build)",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
+                "CMAKE_BUILD_TYPE": "Release",
+                "CONFIG_DUAL_SPI": true,
+                "CONFIG_HIL_TESTS": false
             }
+        },
+        {
+            "name": "hil-debug",
+            "inherits": "default",
+            "description": "Dual SPI mode with HIL automated test suite (Debug build)",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CONFIG_DUAL_SPI": true,
+                "CONFIG_HIL_TESTS": true
+            }
+        },
+        {
+            "name": "tft-diagnostic",
+            "inherits": "default",
+            "description": "Minimal TFT hardware diagnostic mode (Debug build)",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CONFIG_DUAL_SPI": true,
+                "CONFIG_TFT_ONLY": true
+            }
+        },
+        {
+            "name": "Debug",
+            "inherits": "dual-debug"
+        },
+        {
+            "name": "Release",
+            "inherits": "dual-release"
         }
     ],
     "buildPresets": [
+        {
+            "name": "dual-debug",
+            "configurePreset": "dual-debug"
+        },
+        {
+            "name": "dual-release",
+            "configurePreset": "dual-release"
+        },
+        {
+            "name": "hil-debug",
+            "configurePreset": "hil-debug"
+        },
+        {
+            "name": "tft-diagnostic",
+            "configurePreset": "tft-diagnostic"
+        },
         {
             "name": "Debug",
             "configurePreset": "Debug"

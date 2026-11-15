@@ -1,215 +1,332 @@
-# STM32F103C8T6 裸机 GC9A01 + W25QXX 共享 SPI1（DMA + 总线仲裁）
+# STM32F103 双 SPI 驱动与交互式 Demo (GC9A01 TFT + W25Q128 Flash)
 
-> 接线、构建与排障见 [USAGE.md](USAGE.md)；实测数据与限制见 [TEST_REPORT.md](TEST_REPORT.md)。
+[![Host Tests CI](https://github.com/Crazypsy92/stm32f103-gc9a01-w25qxx-spi-bus/actions/workflows/host-tests.yml/badge.svg)](https://github.com/Crazypsy92/stm32f103-gc9a01-w25qxx-spi-bus/actions/workflows/host-tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![MCU](https://img.shields.io/badge/MCU-STM32F103C8T6-blue.svg)](https://www.st.com)
+[![Build](https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-brightgreen.svg)]()
 
-240×240 圆屏 GC9A01 与 W25Q128 NOR Flash **共用同一个 SPI1**，两者都启用 DMA，靠一层与 MCU 无关的总线抽象 `spi_bus` 完成速率切换与独占仲裁；高优先级中断试图抢占总线会被直接拒绝。全部结论来自实物测试（SWD 读数 + 屏幕输出 + RAM 数据校验）。
+本项目是面向 **STM32F103C8T6**（Cortex-M3，72MHz，64KB Flash / 20KB SRAM）的开源裸机外设驱动工程。工程采用分层解耦架构，实现了 **双独立硬件 SPI 外设（SPI1 + SPI2）与 DMA** 同时驱动 **GC9A01 240×240 圆形彩色液晶屏** 与 **W25Q128 16MB NOR Flash 存储芯片**，并配备专为圆屏设计的单按键交互式演示程序（Interactive Demo）。
 
-## 1. 硬件
+---
 
-| 项目 | 配置 |
-|---|---|
-| MCU | STM32F103C8T6，HSE 8 MHz → PLL 72 MHz，64 KB Flash / 20 KB SRAM |
-| 库 / 构建 | STM32Cube LL（无 HAL 外设初始化）+ CMake + Ninja + arm-none-eabi-gcc |
-| 屏幕 | GC9A01，240×240，RGB565，SPI 模式 0，**18 MHz**（72 MHz ÷ 4），DMA |
-| Flash | W25Q128（实测 ID `EF17`，16 MB），SPI 模式 0，**9 MHz**（72 MHz ÷ 8），DMA |
-| 共用 SPI | SPI1：SCK=PA5、MISO=PA6、MOSI=PA7（CubeMX 未使能，代码配置） |
-| 屏幕控制 | CS=PA9、RST=PA10、DC=PB13（背光常亮，无控制脚） |
-| Flash 片选 | CS=PA8 |
-| DMA | 仅 DMA1：SPI1_TX→`DMA1_Channel3`，SPI1_RX→`DMA1_Channel2` |
-| 按键 / LED | KEY1=PB12、KEY2=PB14、LED=PC13（模块已实现，当前主流程未启用） |
-| 调试 | SWD（PA13/PA14），`LL_GPIO_AF_Remap_SWJ_NOJTAG()` 保留 SW-DP |
+## 目录
 
-## 2. 目录结构
+1. [项目特性](#一项目特性)
+2. [硬件环境](#二硬件环境)
+3. [系统架构](#三系统架构)
+4. [双 SPI 硬件接线](#四双-spi-硬件接线)
+5. [DMA 通道分配](#五dma-通道分配)
+6. [编译环境准备](#六编译环境准备)
+7. [编译与构建](#七编译与构建)
+8. [固件烧录](#八固件烧录)
+9. [KEY1 单按键操作说明](#九key1-单按键操作说明)
+10. [交互式 Demo 功能演示](#十交互式-demo-功能演示)
+11. [Host 自动化测试](#十一host-自动化测试)
+12. [目录结构](#十二目录结构)
+13. [已知限制](#十三已知限制)
+14. [文档索引](#十四文档索引)
 
+---
+
+## 一、项目特性
+
+- **双独立 SPI 并发架构**：
+  - **SPI1 (18 MHz + DMA1 Ch3/Ch2)**：专用驱动 GC9A01 240×240 彩色圆屏，高速流畅刷屏。
+  - **SPI2 (9 MHz + DMA1 Ch5/Ch4)**：专用驱动 W25Q128 16MB NOR Flash，大容量稳定存储。
+- **高内聚低耦合分层架构**：
+  - 核心协议驱动（`gc9a01.c` 与 `w25qxx.c`）为**纯 C 实现**，零 MCU 寄存器与底层库依赖，支持跨平台移植。
+  - 硬件总线层提供独占互斥仲裁、嵌套重入、中断抢占防御与动态配置注入能力。
+- **内存极致优化（轻量安全）**：
+  - **零全屏显存**：采用行缓冲技术（<= 480 字节），彻底消除 115 KB 全屏 FrameBuffer 开销。
+  - **零动态内存分配**：全工程不调用 `malloc` / `free`，内存占用恒定，Flash ~33KB (Release)，SRAM ~3KB (15%)。
+- **全方位数据安全保护**：
+  - 正式 Demo 固件处于**严格只读模式**，绝对不擦除、不写入外部 Flash，0 磨损保护存储数据。
+- **单按键智能交互**：
+  - 基于 MultiButton 状态机，使用单个按键（KEY1 / PB12）实现单击切换、长按进入/退出的完整圆屏 UI 导航。
+  - 板载 LED (PC13) 提供瞬态按键响应视觉反馈。
+- **完善的测试体系**：
+  - 提供 5 套 Host 端自动化单元测试，支持 CTest 与 ASan/UBSan 内存安全检查。
+  - 提供独立的硬件在环 (HIL) 自动化回归与极简屏幕诊断模式。
+
+---
+
+## 二、硬件环境
+
+| 硬件组件 | 型号 / 规格 | 说明 |
+|:---|:---|:---|
+| **核心微控制器** | **STM32F103C8T6** | ARM Cortex-M3 @ 72MHz, 64KB Flash, 20KB SRAM |
+| **显示屏幕** | **GC9A01** | 240×240 分辨率，1.28 寸圆屏，IPS 全视角，RGB565 色彩 |
+| **外部存储** | **W25Q128FV** | 16 MB (128 Mbit) SPI NOR Flash |
+| **调试烧录器** | **ST-Link V2** | SWD 两线调试接口 |
+| **用户交互** | **按键 KEY1 + LED** | KEY1 (PB12, 内部上拉), LED (PC13, 低有效) |
+| **供电电压** | **3.3V** | MCU、屏幕与 Flash 统一使用 3.3V 稳压电源 |
+
+---
+
+## 三、系统架构
+
+```mermaid
+flowchart TD
+    APP["应用层 (app_demo.c / app_hil_test.c)"]
+    
+    subgraph PROTOCOL ["设备协议层 (纯 C，零 MCU 依赖)"]
+        GC9A01["GC9A01 驱动 (gc9a01.c)"]
+        W25QXX["W25QXX 驱动 (w25qxx.c)"]
+    end
+    
+    subgraph PORT ["设备移植层 (配置注入)"]
+        GC_PORT["gc9a01_port.c"]
+        W25_PORT["w25qxx_port.c"]
+    end
+    
+    subgraph BUS ["SPI 抽象总线核心"]
+        SPI_BUS["spi_bus.h\n(互斥锁 / 重入嵌套 / 中断防御 / 参数注入)"]
+    end
+    
+    subgraph HW ["板级与硬件驱动 (STM32 LL)"]
+        BSP_SPI["bsp_spi.c (SPI1 & SPI2 实例管理)"]
+        LL_SPI["spi_stm32_ll.c (LL 寄存器 / DMA 引擎)"]
+    end
+    
+    APP --> PROTOCOL
+    APP --> PORT
+    PROTOCOL --> PORT
+    PORT --> BUS
+    BUS --> HW
 ```
-GC9A01/
-├── CMakeLists.txt                 BSP 源文件清单（产物 gc9a01.elf）
-├── CMakePresets.json              Debug / Release（Ninja）
-├── gc9a01.ioc                     CubeMX 配置（仅时钟/GPIO，SPI 与 DMA 由代码配置）
-├── cmake/
-│   ├── gcc-arm-none-eabi.cmake    工具链
-│   └── stm32cubemx/               CubeMX 生成的源文件/符号清单（含补齐的 LL SPI/DMA）
-├── Core/
-│   ├── Inc/                       main.h / stm32f1xx_it.h
-│   └── Src/                       main.c、stm32f1xx_it.c（SysTick → Timebase）
-├── BSP/
-│   ├── Inc/
-│   │   ├── spi_bus.h              ⭐ SPI 总线抽象接口（MCU 无关，含仲裁与并发约束）
-│   │   ├── spi_stm32_ll.h         STM32F1 LL 实现描述（硬件描述结构体）
-│   │   ├── bsp_spi.h              板级 SPI1 单例 + TIM2 抢占探针接口
-│   │   ├── gc9a01.h / gc9a01_port.h       屏幕协议层 / 移植层
-│   │   ├── w25qxx.h / w25qxx_port.h       Flash 协议层 / 移植层
-│   │   ├── app_test.h             上电自测与总线并发测试
-│   │   ├── delay.h                SysTick 1ms + DWT 微秒时基
-│   │   ├── multi_button.h / key_port.h    按键状态机（预留）
-│   │   ├── lcdfont.h / image.h    字库 / 图片资源
-│   │   └── bsp_includes.h         BSP 统一入口
-│   └── Src/                       对应实现
-├── Drivers/                       STM32F1xx LL + CMSIS
-└── STM32F103xx_FLASH.ld           链接脚本
-```
 
-## 3. 分层与数据流
+---
 
-```
-app_test.c / main.c                     应用与测试
-      │  LCD_Fill / LCD_ShowString / W25QXX_Read / W25QXX_Write
-      ▼
-gc9a01.c / w25qxx.c                     纯协议层（不含任何 MCU 头文件）
-      │  LCD_Port 回调表            W25QXX_Bus 回调表
-      │  cs/rst/dc/delay/write      cs_low/cs_high/swap/millis
-      │                             + 可选 read_bulk/write_bulk
-      ▼
-gc9a01_port.c / w25qxx_port.c           移植层：引脚、速率、acquire/release
-      │  spi_bus_acquire → 传输 → spi_bus_release
-      ▼
-spi_bus.h                               抽象总线（owner/depth/rejects 仲裁）
-      │  configure / transfer / in_isr
-      ▼
-spi_stm32_ll.c                          唯一的 SPI/DMA 时序实现（LL）
-      ▲
-bsp_spi.c                               SPI1 单例（BSP_SPI1_GetBus）+ TIM2 抢占探针
-```
+## 四、双 SPI 硬件接线
 
-设备协议层完全不知道 MCU 的存在：换平台时只替换 `spi_stm32_ll.c`（新平台的 SPI 实现），`gc9a01.c`、`w25qxx.c`、`spi_bus.h`、`app_test.c` 一行都不用改。
+> [!IMPORTANT]
+> **关键引脚防坑提示**：
+> 1. **TFT DC 改接 PA4**：由于 SPI2_SCK 必须占用 PB13，屏幕命令/数据选择线 (DC) **必须接在 PA4**，切勿接在 PB13！
+> 2. **PB14 专用作 SPI2_MISO**：PB14 专用于 Flash 数据接收，已彻底移除按键 KEY2，切勿在 PB14 外接按键输入。
 
-## 4. 总线接口（`spi_bus.h`）
+### 1. GC9A01 TFT 显示屏接线 (SPI1)
 
-| 接口 / 字段 | 说明 |
-|---|---|
-| `spi_bus_config_t` | `clock_hz`（目标 SCLK）+ `mode`（0~3）+ `use_dma` |
-| `spi_bus_acquire(bus, owner, cfg)` | 占用总线并切到本设备参数；被他人占用或在 ISR 中调用返回 `-1`；同 owner 嵌套时仅增加 depth（不重新配置外设，要求参数严格一致） |
-| `spi_bus_release(bus, owner)` | 释放总线；仅占用者本人可调用；返回 `1` 表示完全释放（Port 层可拉高片选 CS），返回 `0` 表示仍处于嵌套事务中（CS 保持有效），返回 `-1` 表示非法调用 |
-| `spi_bus_owner(bus)` | 查询当前占用者，空闲返回 `NULL` |
-| `spi_bus_transfer(bus, owner, tx, rx, len)` | 全双工传输；必须传入调用者 `owner`；非持有者或未 acquire 直接返回 `-1`；`rx` 可为 `NULL` |
-| `bus->owner / depth / rejects` | 占用者 / 重入深度（最大 `UINT16_MAX` 饱和防溢出） / 被拒绝次数 |
-| `ops->in_isr(bus)` | 实现方上报是否处于中断上下文（Cortex-M3 `__get_IPSR() != 0`） |
-| `BSP_SPI1_Recover()` | 统一异常恢复：复位 DMA 请求/通道、清标志与 OVR、排空 RX、重载配置 |
+| 屏幕引脚 | STM32 引脚 | 信号定义 | 说明 |
+|:---:|:---:|:---:|:---|
+| **VCC** | **3.3V** | 供电正极 | 必须为 3.3V，建议就近加 0.1µF 电容 |
+| **GND** | **GND** | 电源共地 | 与 MCU 共地 |
+| **SCL** | **PA5** | SPI1_SCK | SPI1 时钟 (18 MHz) |
+| **SDA** | **PA7** | SPI1_MOSI | SPI1 主机输出 |
+| **RES** | **PA10** | TFT_RST | 硬件复位脉冲 (低有效) |
+| **DC** | **PA4** | TFT_DC | **★ 数据/命令选择 (0=命令, 1=数据)** |
+| **CS** | **PA9** | TFT_CS | 屏幕片选 (低有效) |
+| **BLK** | **3.3V** | 背光使能 | 常亮（直连 3.3V） |
 
-关键设计：
+### 2. W25Q128 NOR Flash 接线 (SPI2)
 
-- **owner 用设备上下文指针充当强类型身份**（`&s_hw` / `&s_ctx`），杜绝未经授权的跨设备或旁路数据注入。
-- **同一 owner 安全嵌套**（`depth++`），必须参数一致且绝不重复配置底层外设；仅最外层 release 才拉高物理片选。
-- **状态不变量守卫**：始终满足 `(owner == NULL) <=> (depth == 0)`，防止非法状态漂移。
-- **详细方案与验收文档**：
-  - [Stage 1 整改方案与设计文档](docs/stage1_spi_reliability_plan.md)
-  - [Stage 1 测试报告 (Host + HIL)](docs/stage1_spi_reliability_test_report.md)
-  - [Stage 1 验收清单](docs/stage1_spi_reliability_acceptance.md)
+| Flash 引脚 | STM32 引脚 | 信号定义 | 说明 |
+|:---:|:---:|:---:|:---|
+| **VCC** | **3.3V** | 供电正极 | 3.3V 供电 |
+| **GND** | **GND** | 电源共地 | 与 MCU 共地 |
+| **CLK** | **PB13** | SPI2_SCK | SPI2 时钟 (9 MHz) |
+| **DO (MISO)** | **PB14** | SPI2_MISO | **★ Flash 数据输入至 MCU** |
+| **DI (MOSI)** | **PB15** | SPI2_MOSI | MCU 输出至 Flash 命令/数据 |
+| **CS** | **PA8** | FLASH_CS | Flash 独立片选 (低有效) |
+| **WP / HOLD** | **3.3V** | 保护与暂停 | 必须接 3.3V 高电平（模块通常已内置上拉） |
 
-## 5. 并发模型（使用前必须理解）
+### 3. 用户按键与调试口
 
-1. **独占式**：`acquire → transfer… → release` 期间总线只属于一个设备。`transfer()` 是阻塞的（DMA 也等 TC/BSY 才返回），因此任何时刻只有一条 SPI 事务在跑，不存在两个设备交叉改写同一外设。
-2. **中断安全**：ISR 里调用 `acquire()` 会被直接拒绝（`spi_stm32_ll.c` 用 `__get_IPSR()` 哨兵）。原因是中断若插进主循环事务中间，会改掉当前速率/模式并重配 DMA 通道。若中断确实要访问 SPI，应把请求排进队列，由主循环统一执行。
-3. **异步 DMA 尚未支持**：当前 `release` 必须在 `transfer()` 返回后立即执行。要改成非阻塞，需把 `release` 挪到"传输完成"回调里，并给 `acquire` 增加忙等待/超时语义。
+| 功能 | STM32 引脚 | 说明 |
+|:---:|:---:|:---|
+| **KEY1** | **PB12** | 单按键输入（内部上拉，按下接 GND） |
+| **LED** | **PC13** | 板载指示灯（低电平点亮，按键翻转反馈） |
+| **SWDIO / SWCLK** | **PA13 / PA14** | ST-Link 仿真调试接口 |
 
-这三条由 `AppBusTest()` 的 **18 项契约检查** + **20 kHz 高优先级中断压力测试** 全量覆盖，并在物理硬件上验证通过（见 [TEST_REPORT.md](TEST_REPORT.md)）。
+---
 
-## 6. DMA 与可靠性策略
+## 五、DMA 通道分配
 
-| 规则 | 说明 |
-|---|---|
-| 阈值 `SPI_DMA_MIN_LEN = 16` | ≥16 字节走 DMA，小块自动回落轮询（单字节启动 DMA 的开销大于传输本身） |
-| 通道固定 | SPI1_TX→DMA1_Ch3、SPI1_RX→DMA1_Ch2（C8T6 只有 DMA1） |
-| 完成与错误判定 | 同时监测 `TCIF` 完成与 `TEIF` 传输错误标志；出现错误立即终止等待并返回 `SPI_LL_ERROR_DMA` |
-| 时序结束保障 | DMA 结束后严格串行等待 `TXE == 1` 和 `BSY == 0`，确认最后一个字节移出后才允许释放片选 |
-| 绝对时钟超时 | 基于 Cortex-M3 `DWT->CYCCNT` 周期计数器实现超时判定，天然处理 32 位回绕，无惧中断抖动 |
-| 自动长度分块 | 针对 STM32F1 DMA 16 位 `CNDTR` 限制，单次传输 $>65535$ 时底层自动切块，分块间 CS 维持连续有效 |
-| 全双工残留与 OVR | 传输前后自动排空 RX 缓冲区并执行清 OVR 序列，避免全双工通信时因 RX 溢出锁死 SPI 外设 |
-| Flash 读 | 命令后按 64 字节分块，用静态 `0xFF` 哑元缓冲喂 TX，边发边收 |
-| Flash 写 | 页写数据段整块交给 `write_bulk`（TX-only DMA），拉高 CS 后预留电荷泵建立延迟（$t_{\text{PP}}$ 窗口） |
-| 屏幕 | `gc9a01.c` 的 480 字节行缓冲作为 DMA 源，`LCD_Fill` 按行发送 |
-| 冲突规避 | 两个设备争用同一组通道，但事务是阻塞且互斥的，通道不会在传输中被改配 |
+系统采用 STM32F103 的 DMA1 硬件控制器进行多通道独立收发：
 
-## 7. 设备驱动接口
+| 外设接口 | DMA 控制器 | TX 发送通道 | RX 接收通道 | 传输优先级 | 传输模式 |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| **SPI1 (TFT)** | DMA1 | **Channel 3** | **Channel 2** | High | 内存到外设 (8-bit) |
+| **SPI2 (Flash)**| DMA1 | **Channel 5** | **Channel 4** | High | 内存到外设 / 外设到内存 (8-bit) |
 
-**GC9A01（`gc9a01.h`）**
+---
 
-| 接口 | 说明 |
-|---|---|
-| `GC9A01_PortInit()` | 初始化总线绑定、CS/RST/DC 并发送屏幕初始化序列（`gc9a01_port.c`） |
-| `GC9A01_Init(dev, port)` | 协议层初始化，绑定 `LCD_Port` 回调表 |
-| `LCD_Fill / LCD_DrawPoint / LCD_DrawLine / LCD_DrawRectangle / Draw_Circle` | 基本图形 |
-| `LCD_ShowChar / LCD_ShowString / LCD_ShowIntNum / LCD_ShowFloatNum1` | 文字（16/24 号字，RGB565 前景/背景） |
-| `LCD_ShowPicture` | RGB565 图片块 |
-| `g_lcd` | 全局设备句柄（`gc9a01_port.c` 中定义） |
+## 六、编译环境准备
 
-**W25QXX（`w25qxx.h`）**
-
-| 接口 | 说明 |
-|---|---|
-| `W25QXX_PortInit()` | 配置 CS(PA8)、绑定共享总线、读 ID/容量到 `g_flash` |
-| `W25QXX_Init(dev, bus)` | 协议层绑定 `W25QXX_Bus` 回调表并识别型号 |
-| `W25QXX_Read / Write / Write_NoCheck` | 读 / 自动擦除+翻页写 / 纯页写 |
-| `W25QXX_EraseSector / EraseChip / PowerDown / WakeUp / ReadID / RefreshID` | 擦除、低功耗与 ID 操作 |
-| 返回值 | `W25QXX_OK / ERROR_PARAM / ERROR_TIMEOUT / ERROR_BUS`；`dev->last_result` 保留最近一次结果 |
-
-注意：`W25QXX_Write()` 会先擦除覆盖到的扇区，**同扇区其它数据会丢失**；需要保留时自行「读出 → 修改 → 擦除 → 回写」。
-
-## 8. 配置位置
-
-| 位置 | 宏 | 当前值 |
-|---|---|---|
-| `bsp_spi.c` 顶部 | `BSP_SPI1_*`（外设/时钟/SCK/MISO/MOSI/DMA 通道） | SPI1、72 MHz、PA5/6/7、DMA1 |
-| `gc9a01_port.c` 顶部 | `GC9A01_CS/RST/DC_PORT/PIN` | PA9 / PA10 / PB13 |
-| `gc9a01_port.c` 顶部 | `GC9A01_SPI_CLOCK_HZ / MODE / USE_DMA` | 18 MHz / 模式 0 / 1 |
-| `w25qxx_port.c` 顶部 | `W25QXX_CS_PORT/PIN` | PA8 |
-| `w25qxx_port.c` 顶部 | `W25QXX_SPI_CLOCK_HZ / MODE / USE_DMA / BULK_CHUNK` | 9 MHz / 模式 0 / 1 / 64 |
-| `gc9a01.h` | `LCD_W / LCD_H / LCD_ROTATION` | 240 / 240 / 180° |
-| `delay.h` | `ENABLE_PRINTF_REDIRECT` | 0（关闭 printf 重定向） |
-| `bsp_spi.h` | `BSP_SPI1_PreemptProbe_*` | 测试用探针，可整体删除 |
-
-所有构建选项都在源码宏里，**没有 CMake `-D` 后端开关**，改完重新编译即可。
-
-## 9. 编译与烧录
+以 Ubuntu / Debian Linux 系统为例：
 
 ```bash
-cmake --preset Debug && cmake --build build/Debug     # 产物 build/Debug/gc9a01.elf
+# 1. 安装交叉编译器与调试器
+sudo apt-get update
+sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi gdb-multiarch
 
+# 2. 安装构建工具与烧录工具
+sudo apt-get install -y cmake ninja-build openocd
+```
+
+---
+
+## 七、编译与构建
+
+工程采用标准 `CMakePresets.json` 预设，推荐使用 Ninja 构建：
+
+```bash
+# 1. 编译默认交互式 Demo (Debug 版)
+cmake --preset dual-debug
+cmake --build --preset dual-debug
+
+# 2. 编译生产优化版 (Release 版)
+cmake --preset dual-release
+cmake --build --preset dual-release
+
+# 3. 编译 HIL 自动化回归测试版
+cmake --preset hil-debug
+cmake --build --preset hil-debug
+
+# 4. 编译极简 TFT 硬件诊断版
+cmake --preset tft-diagnostic
+cmake --build --preset tft-diagnostic
+```
+
+构建成功后，将在对应目录下自动输出 `.elf`、`.bin` 和 `.hex` 文件，并打印 Flash/RAM 占用统计。
+
+---
+
+## 八、固件烧录
+
+连接好 ST-Link V2 后，使用 OpenOCD 一键烧录并运行：
+
+```bash
 openocd -f interface/stlink.cfg -f target/stm32f1x.cfg \
-  -c "program build/Debug/gc9a01.elf verify reset exit"
+  -c "program build/dual-debug/stm32f103_gc9a01_w25qxx.elf verify reset exit"
 ```
 
-在线调试：
+---
+
+## 九、KEY1 单按键操作说明
+
+系统针对 GC9A01 240×240 圆形屏幕进行了单按键全功能交互适配：
+
+| 按键动作 | 时间阈值 | 在主菜单页的功能 | 在子演示页面的功能 |
+|:---|:---:|:---|:---|
+| **短按 (Click)** | 50 ~ 300 ms | **切换下一个菜单项**（高亮框循环下移） | **切换显示图案 / 触发数据重新读取 / 刷新状态** |
+| **长按 (Hold)** | > 1000 ms (约 1 秒) | **确认并进入当前高亮页面** | **退出当前页面，返回主菜单** |
+
+- **LED 反馈**：每次按键触发有效动作时，板载 LED (PC13) 会自动翻转一次状态。
+
+---
+
+## 十、交互式 Demo 功能演示
+
+Demo 包含 1 个主菜单与 4 个功能页面：
+
+1. **MAIN MENU (主菜单导航)**：
+   - 居中显示 `1. DISPLAY DEMO`, `2. FLASH READ ONLY`, `3. DUAL SPI STATUS`, `4. KEY1 INPUT TEST`。
+   - 带有高亮选择框与按键提示，短按切换，长按进入。
+2. **1. DISPLAY DEMO (图形色彩演示)**：
+   - 短按在 **3 种显示图案** 间循环切换：
+     1. `Shapes & Geometry`：矩形边框、对角十字线、同心圆与局部填充色块。
+     2. `RGB565 Color Bars`：红、绿、蓝、黄、青、洋红六阶横向色彩条。
+     3. `Radial Target`：同心靶心多层圆环与坐标中心线。
+   - 长按返回主菜单。
+3. **2. FLASH READ ONLY (外部 Flash 只读验证)**：
+   - **严格 0 擦除、0 写入安全模式**。
+   - 读取并显示 JEDEC ID（`0xEF17 (OK)`）与容量（`16 MB`）。
+   - 在安全偏移地址 `0x00100000` 连续读取两次 32 字节数据并进行严格比对，显示 `Verify: 32B Match [PASS]`。
+   - 短按触发单次重新读取，递增轮次计数；长按返回主菜单。
+4. **3. DUAL SPI STATUS (双 SPI 总线监控)**：
+   - 实时显示 SPI1 (18MHz / DMA Ch3-Ch2 / GC9A01) 与 SPI2 (9MHz / DMA Ch5-Ch4 / W25Q128) 独立参数与总线状态。
+   - 短按刷新状态；长按返回主菜单。
+5. **4. KEY1 INPUT TEST (按键输入测试)**：
+   - 实时显示 PB12 物理电平（`PRESSED (0)` / `RELEASED (1)`）、短按累计次数与长按累计次数。
+   - 屏幕中心指示图形随按键实时变化（按下变绿实心，释放变为空心）。
+   - 短按增加计数；长按返回主菜单。
+
+---
+
+## 十一、Host 自动化测试
+
+无需目标硬件，在 PC 上即可运行 5 套核心单元测试（位于 `tests/host/`）：
 
 ```bash
-openocd -f interface/stlink.cfg -f target/stm32f1x.cfg      # 终端 1
-arm-none-eabi-gdb build/Debug/gc9a01.elf -ex "target remote :3333"
+# 编译并运行 Host 测试
+cmake -S tests/host -B tests/host/build
+cmake --build tests/host/build
+ctest --test-dir tests/host/build --output-on-failure
+
+# 运行 AddressSanitizer & UBSan 内存安全检查
+cmake -S tests/host -B tests/host/build_asan \
+  -DCMAKE_C_FLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+cmake --build tests/host/build_asan
+ctest --test-dir tests/host/build_asan --output-on-failure
 ```
 
-## 10. 上电流程
+---
 
-`main()` 依次执行：
+## 十二、目录结构
 
-1. `Timebase_Init()`：SysTick 1 ms 心跳 + DWT 微秒计数
-2. `GC9A01_PortInit()` → 屏幕初始化
-3. `W25QXX_PortInit()` → 绑定同一 SPI1 并读 ID
-4. `AppTFT_Test()`：红/绿/蓝全屏 → 6 色条 → 文字 → 边框与圆（约 1 s）
-5. `AppFlash_Test()`：3 轮 256 B 写-读-校验，每轮插入 TFT DMA 色块
-6. `AppBusTest()`：10 项接口契约 + 20 kHz 中断抢占压力测试，结果显示在屏幕上
-7. 主循环：`AppTFT_Task()` 心跳方块每 500 ms 翻转
-
-屏幕最终画面（正常情况）：
-
+```text
+stm32f103-gc9a01-w25qxx-spi-bus/
+│
+├── README.md                      # 项目主文档
+├── CMakeLists.txt                 # CMake 构建脚本 (含 .bin / .hex 生成)
+├── CMakePresets.json              # 构建预设 (dual-debug, dual-release, hil-debug, tft-diagnostic)
+├── gc9a01.ioc                     # STM32CubeMX 工程文件
+├── .gitignore                     # Git 忽略规则
+│
+├── BSP/                           # 板级支持包与驱动
+│   ├── Inc/
+│   │   ├── spi_bus.h              # ⭐ SPI 抽象总线核心接口 (MCU 无关)
+│   │   ├── bsp_spi.h              # 板级 SPI1/SPI2 实例管理头文件
+│   │   ├── spi_stm32_ll.h         # STM32 LL 硬件适配层头文件
+│   │   ├── gc9a01.h               # GC9A01 屏幕纯协议驱动
+│   │   ├── gc9a01_port.h          # GC9A01 移植层与配置注入
+│   │   ├── w25qxx.h               # W25QXX Flash 纯协议驱动
+│   │   ├── w25qxx_port.h          # W25QXX 移植层与配置注入
+│   │   ├── key_port.h             # KEY1 (PB12) 单按键驱动接口
+│   │   ├── multi_button.h         # 按键状态机核心
+│   │   ├── delay.h                # DWT 微秒延时与 SysTick 时基
+│   │   ├── app_demo.h             # 交互式 Demo 接口
+│   │   └── bsp_includes.h         # BSP 统一入口
+│   │
+│   └── Src/                       # 对应 C 源文件实现
+│
+├── Core/                          # STM32Cube 核心代码
+│   ├── Inc/                       # main.h, gpio.h 等
+│   └── Src/                       # main.c, gpio.c 等
+│
+├── Drivers/                       # STM32F1xx LL 库与 CMSIS
+├── cmake/                         # 工具链与 CubeMX 构建配置
+│
+├── tests/
+│   ├── host/                      # PC 端 5 套 Host 单元测试与 CTest
+│   └── target/                    # 目标板 HIL 自动化回归与诊断测试 (app_hil_test.c)
+│
+├── doc/                           # 开发与技术文档
+│   ├── user_guide.md              # 快速使用指南
+│   ├── hardware_wiring.md         # 硬件引脚接线说明书
+│   ├── architecture.md            # 系统分层与架构设计
+│   ├── porting_guide.md           # 驱动移植与二次开发指南
+│   └── testing.md                 # 测试体系与验证方法
+│
+└── .github/
+    └── workflows/
+        └── host-tests.yml         # GitHub Actions 自动化 CI 流水线
 ```
-BUS CONCURRENCY TEST
-CT:10/10 G:0 E:0000        ← 契约全过、ISR 占用次数 0、失败位图 0
-IRQ:12500 HIT:9593         ← 中断次数 / 其中撞上总线正忙的次数
-W/R:10/10 SUM:xxxx         ← 10 轮 Flash 读写校验全过
-OWNER:NULL DEPTH:0
-TFT:DMA FLASH:DMA
-PASS xxxms
-```
 
-## 11. 新增第三个 SPI 设备 / 换平台
+---
 
-新增设备（例如另一颗 SPI 传感器）：
+## 十三、已知限制
 
-1. 在它的 port 层保存 `spi_bus_t *bus` 和 `spi_bus_config_t cfg`；
-2. 事务开始 `spi_bus_acquire(bus, &s_ctx, &cfg)`，结束 `spi_bus_release(bus, &s_ctx)`；
-3. 片选、命令/数据切换全部在 port 层完成，协议层只调用回调表。
+1. **屏幕背光控制**：当前工程未连接独立 PWM 调光引脚，BLK 直连 3.3V 保持常亮。
+2. **Flash 擦写限制**：正式应用 Demo 仅开放只读接口，不执行物理擦除与写入操作，确保零磨损。
+3. **跨 MCU 移植**：当前已完成实机验证的芯片为 STM32F103 系列，若移植至其他 MCU 系列，需根据 `doc/porting_guide.md` 实现对应的 `spi_bus_ops_t` 适配层。
 
-换 MCU：只需重写 `spi_stm32_ll.c`（或新写一个 `spi_xxx.c` 实现 `spi_bus_ops_t`）并在板级文件里创建单例；`spi_bus.h`、两个设备驱动、`app_test.c` 无需修改。
+---
 
-## 12. 验收状态
+## 十四、文档索引
 
-代码已在 STM32F103C8T6 + GC9A01 + W25Q128 实物上完成编译、烧录与 SWD 验证：契约 10/10、抢占 `granted=0`、`owner/depth` 归零、CFSR/HFSR 为 0、10 轮读写数据逐字节正确。详细数据与已知限制见 [TEST_REPORT.md](TEST_REPORT.md)。
+- [使用指南 (User Guide)](doc/user_guide.md)
+- [硬件接线说明 (Hardware Wiring)](doc/hardware_wiring.md)
+- [系统分层架构设计 (Architecture)](doc/architecture.md)
+- [移植与二次开发指南 (Porting Guide)](doc/porting_guide.md)
+- [测试规范与验证指南 (Testing Guide)](doc/testing.md)

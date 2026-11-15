@@ -1,15 +1,15 @@
 /**
- * @file app_test.h
- * @brief 应用层显示测试模块接口
- * @details GC9A01 上电自测 + 周期心跳任务，测试逻辑集中在本模块，
- *          main.c 只负责底层初始化和周期调度。
- *          Stage 2.2-A-HIL: 新增 TFT_ONLY 最小硬件诊断与板级诊断导出结构。
+ * @file app_hil_test.h
+ * @brief 目标硬件在环 (HIL) 自动化回归与诊断测试模块接口
+ * @details 独立于正式应用固件。仅在开启 CONFIG_HIL_TESTS 或 CONFIG_TFT_ONLY 时编译。
+ *          包含 GC9A01 上电自测、W25QXX 读写与数据完整性校验、SPI 契约与 TIM2 中断抢占压力测试。
  */
 
-#ifndef __APP_TEST_H_
-#define __APP_TEST_H_
+#ifndef __APP_HIL_TEST_H_
+#define __APP_HIL_TEST_H_
 
 #include <stdint.h>
+#include "gc9a01.h"
 
 /**
  * @brief 测试模式配置
@@ -58,37 +58,65 @@ typedef struct {
     uint32_t test_complete;      /* 1 = 测试完成 */
 } tft_diag_result_t;
 
+/**
+ * @brief AppBusTest 结果导出（供 SWD 读取做 HIL 验收）
+ */
+typedef struct {
+    uint32_t magic;              /* 0x54534554 ('TEST') */
+    uint32_t ct_pass, ct_total;
+    uint32_t ct_fail;            /* s_ct_fail 位图 */
+    uint32_t rounds_ok, rounds_total;
+    uint32_t len_ok, len_count;
+    uint32_t str_ok, str_total;
+    uint32_t fl_ok, fl_total;
+    uint32_t fl_last_result;     /* 失败时的 W25QXX_Result */
+    uint32_t fl_fail_round;      /* 失败所在轮次 */
+    uint32_t erase_count;        /* 实际物理扇区擦除次数（安全模式下严格为 0） */
+    uint32_t rec_ok;
+    uint32_t ll_recover_count;   /* LL 层恢复调用次数 */
+    int32_t  ll_last_error;      /* LL 层最后一次错误码 */
+    uint32_t owner_null;         /* 结束时 owner == NULL */
+    uint32_t depth_zero;         /* 结束时 depth == 0 */
+    uint32_t pass;               /* 总体 PASS */
+    uint32_t elapsed_ms;
+    /* Stage 1.2 安全与诊断字段 */
+    uint32_t test_mode;          /* 0: SAFE/READ-ONLY, 1: DESTRUCTIVE */
+    uint32_t test_sector_addr;   /* 经确认的测试扇区物理地址 */
+    uint32_t rounds_fail_stage;
+    uint32_t rounds_fail_tx0;
+    uint32_t rounds_fail_rx0;
+    /* Stage 1.2-B: 数据一致性校验扩展统计 */
+    uint32_t read_ok;            /* 读取接口成功次数 */
+    uint32_t data_match_ok;      /* 数据重复读取一致次数 */
+    uint32_t data_mismatch;      /* 数据不一致次数 */
+    uint32_t first_mismatch_offset;/* 首个不一致字节偏移 */
+    int32_t  last_flash_error;   /* 最后一次 Flash 错误码 */
+    /* Stage 1.2-C 扩展字段 */
+    uint32_t reference_valid;    /* 预读取基准有效性: bit0=ref_256, bit1=ref_buf, 0x03=全部有效 */
+    uint32_t expected_256_valid; /* 预期恢复基准是否有效（写入失败时置 0） */
+} app_test_result_t;
+
 extern volatile bsp_diag_info_t g_bsp_diag;
 extern volatile tft_diag_result_t g_tft_diag;
 extern volatile tft_diag_result_t g_tft_diag_stages[8];
 extern volatile uint32_t g_tft_diag_stage_count;
+extern volatile app_test_result_t g_app_test_result;
 
+/* HIL 测试启动与调度入口 */
+void AppHIL_Init(void);
+void AppHIL_Run(void);
+void AppHIL_Task(void);
+
+/* TFT 硬件诊断入口 */
 void AppTFT_DiagInit(void);
 void AppTFT_DiagRun(uint32_t clock_hz, uint8_t use_dma);
 void AppTFT_DiagRunAll(void);
 void AppTFT_DiagLoop(void);
 
-/**
- * @brief GC9A01 上电显示自测（颜色/色条/文字/边框/圆），阻塞约 1s
- * @note  需在 GC9A01_PortInit() 之后调用
- */
+/* 子测试接口 */
 void AppTFT_Test(void);
-
-/**
- * @brief W25QXX 共享总线测试：识别与读校验并把结果显示在 TFT 上
- * @note  默认安全模式下仅执行非破坏性只读测试与 TFT DMA 交替访问
- */
 void AppFlash_Test(void);
-
-/**
- * @brief 总线并发测试：接口契约检查 + 高优先级中断抢占压力测试
- * @note  默认安全模式下不执行物理擦除与写入，全量契约与抢占保护仍然有效
- */
 void AppBusTest(void);
-
-/**
- * @brief GC9A01 周期任务：心跳闪烁指示，非阻塞
- */
 void AppTFT_Task(void);
 
-#endif /* __APP_TEST_H_ */
+#endif /* __APP_HIL_TEST_H_ */

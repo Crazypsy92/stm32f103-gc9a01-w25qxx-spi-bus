@@ -74,8 +74,6 @@ void Error_Handler(void);
 #define led_GPIO_Port GPIOC
 #define key1_Pin LL_GPIO_PIN_12
 #define key1_GPIO_Port GPIOB
-#define key2_Pin LL_GPIO_PIN_14
-#define key2_GPIO_Port GPIOB
 #ifndef NVIC_PRIORITYGROUP_0
 #define NVIC_PRIORITYGROUP_0         ((uint32_t)0x00000007) /*!< 0 bit  for pre-emption priority,
                                                                  4 bits for subpriority */

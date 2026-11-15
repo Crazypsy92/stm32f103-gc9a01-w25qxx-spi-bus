@@ -1,0 +1,42 @@
+name: Host Tests CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'refactor/**'
+      - 'codex/**'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    name: CTest & Sanitizers (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [normal, sanitizer]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          if [ "${{ matrix.mode }}" = "sanitizer" ]; then
+            cmake -S tests/host -B tests/host/build \
+              -DCMAKE_C_FLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+          else
+            cmake -S tests/host -B tests/host/build
+          fi
+
+      - name: Build Host Tests
+        run: cmake --build tests/host/build --parallel
+
+      - name: Run CTest
+        run: ctest --test-dir tests/host/build --output-on-failure

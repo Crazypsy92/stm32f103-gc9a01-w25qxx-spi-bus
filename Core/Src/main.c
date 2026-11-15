@@ -124,25 +124,11 @@ int main(void)
     AppTFT_DiagLoop();
   }
   /* USER CODE END 3 */
-#else
-  AppTFT_DiagInit();
-
-  /* 2. GC9A01 TFT 初始化：SPI1（SCK=PA5/MOSI=PA7）、CS=PA9、RES=PA10、DC=(PB13或PA4) */
-  g_tft_init_result = GC9A01_PortInit();
-
-  /* 3. W25QXX 初始化：与 TFT 共享 SPI1 或独占 SPI2，CS=PA8，速率 9MHz */
-  W25QXX_PortInit();
-
-  /* 4. TFT 上电显示自测（仅在 TFT 初始化成功时执行） */
-  if (g_tft_init_result == LCD_OK) {
-    AppTFT_Test();
-  }
-
-  /* 5. 共享总线测试：Flash 识别与非破坏性读校验（默认零擦除安全模式），结果显示在 TFT 上 */
-  AppFlash_Test();
-
-  /* 6. 总线可靠性测试：18项接口契约 + 20kHz 高优先级中断抢占压力测试（默认不擦写 Flash） */
-  AppBusTest();
+#elif defined(CONFIG_HIL_TESTS) && (CONFIG_HIL_TESTS != 0)
+  /* 目标 HIL 自动化回归测试模式：
+   * 运行 SPI 契约测试、TIM2 中断抢占压力测试与 Flash 读写一致性校验。
+   */
+  AppHIL_Run();
 
   /* USER CODE END 2 */
 
@@ -153,7 +139,34 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    AppTFT_Task();   /* 心跳方块闪烁，证明主循环与刷屏链路正常 */
+    AppHIL_Task();
+  }
+  /* USER CODE END 3 */
+#else
+  /* 正式应用交互式 Demo 模式：
+   * 1. 初始化 KEY1 (PB12) 与 LED (PC13)
+   * 2. 初始化 GC9A01 TFT (SPI1, 18MHz DMA)
+   * 3. 初始化 W25Q128 Flash (SPI2, 9MHz DMA)
+   * 4. 启动交互式 Demo 主菜单
+   */
+  KEY_Init();
+  g_tft_init_result = GC9A01_PortInit();
+  W25QXX_PortInit();
+
+  if (g_tft_init_result == LCD_OK) {
+    AppDemo_Init();
+  }
+
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+    AppDemo_Run();
   }
   /* USER CODE END 3 */
 #endif

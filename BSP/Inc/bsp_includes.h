@@ -28,7 +28,11 @@
 #include "gc9a01_port.h"    /* GC9A01 移植层（板级引脚/SPI 配置） */
 #include "w25qxx.h"      /* W25Qxx 设备驱动 */
 #include "w25qxx_port.h"    /* W25QXX 移植层（板级引脚/SPI 配置） */
-#include "app_test.h"       /* 应用层测试模块 */
+#if (defined(CONFIG_HIL_TESTS) && (CONFIG_HIL_TESTS != 0)) || (defined(CONFIG_TFT_ONLY) && (CONFIG_TFT_ONLY != 0))
+#include "app_hil_test.h"   /* 目标 HIL 自动化回归与诊断模块 */
+#else
+#include "app_demo.h"       /* 交互式应用 Demo 模块 */
+#endif
 
 #ifndef DEBUG
 #define DEBUG 0

@@ -5,53 +5,104 @@
  *          Stage 1.2-B: 增强非破坏性读取数据完整性校验，区分通信成功与数据一致性统计。
  */
 
-#include "app_test.h"
+#include "app_hil_test.h"
 #include "bsp_includes.h"
 
 extern volatile uint32_t g_ll_recover_count;
 extern volatile int32_t  g_ll_last_error;
 
+#if !defined(HOST_TEST)
+#define BSP_PROBE_TIM_CLK_HZ 72000000U
+
+static spi_bus_t            *s_probe_bus;
+static const spi_bus_config_t s_probe_cfg = { 1000000U, SPI_BUS_MODE_0, 0 };
+static uint8_t               s_probe_owner;
+static volatile uint32_t     s_probe_probes;
+static volatile uint32_t     s_probe_saw_busy;
+static volatile uint32_t     s_probe_granted;
+
+typedef struct {
+    uint32_t probes;    /* ISR 执行次数 */
+    uint32_t saw_busy;  /* ISR 进入时总线正被主循环占用 */
+    uint32_t granted;   /* ISR 成功占用总线次数，必须恒为 0 */
+} bsp_spi_probe_t;
+
+static void BSP_SPI1_PreemptProbe_Init(void)
+{
+    s_probe_bus = BSP_SPI1_GetBus();
+    LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM2);
+    TIM2->CR1  = 0;
+    TIM2->DIER = 0;
+    TIM2->SR   = (uint32_t)~TIM_SR_UIF;
+
+    NVIC_SetPriority(TIM2_IRQn, 0);
+    NVIC_EnableIRQ(TIM2_IRQn);
+}
+
+static void BSP_SPI1_PreemptProbe_Start(uint32_t rate_hz)
+{
+    uint32_t arr;
+    if (s_probe_bus == NULL) {
+        BSP_SPI1_PreemptProbe_Init();
+    }
+    if (rate_hz == 0U) {
+        rate_hz = 10000U;
+    }
+    s_probe_probes = 0U;
+    s_probe_saw_busy = 0U;
+    s_probe_granted = 0U;
+    arr = 1000000U / rate_hz;
+
+    TIM2->CR1  = 0;
+    TIM2->PSC  = (BSP_PROBE_TIM_CLK_HZ / 1000000U) - 1U;
+    TIM2->ARR  = (arr == 0U) ? 0U : (arr - 1U);
+    TIM2->EGR  = TIM_EGR_UG;
+    TIM2->SR   = (uint32_t)~TIM_SR_UIF;
+    TIM2->DIER = TIM_DIER_UIE;
+    TIM2->CR1  = TIM_CR1_CEN;
+}
+
+static void BSP_SPI1_PreemptProbe_Stop(void)
+{
+    TIM2->CR1  = 0;
+    TIM2->DIER = 0;
+    TIM2->SR   = (uint32_t)~TIM_SR_UIF;
+}
+
+static void BSP_SPI1_PreemptProbe_Inject(void)
+{
+    TIM2->DIER |= TIM_DIER_UIE;
+    TIM2->EGR = TIM_EGR_UG;
+    __DSB();
+    __ISB();
+}
+
+static void BSP_SPI1_PreemptProbe_Get(bsp_spi_probe_t *out)
+{
+    if (out == NULL) return;
+    out->probes   = s_probe_probes;
+    out->saw_busy = s_probe_saw_busy;
+    out->granted  = s_probe_granted;
+}
+
+void TIM2_IRQHandler(void)
+{
+    if ((TIM2->SR & TIM_SR_UIF) == 0U) return;
+    TIM2->SR = (uint32_t)~TIM_SR_UIF;
+
+    s_probe_probes++;
+    if (spi_bus_owner(s_probe_bus) != NULL) {
+        s_probe_saw_busy++;
+    }
+    if (spi_bus_acquire(s_probe_bus, &s_probe_owner, &s_probe_cfg) == 0) {
+        s_probe_granted++;
+        (void)spi_bus_release(s_probe_bus, &s_probe_owner);
+    }
+}
+#endif
+
 /** @brief 总线契约检查失败位图（bit0~bit19 对应 20 项检查，0 表示全部通过） */
 static uint32_t s_ct_fail;
-
-/**
- * @brief AppBusTest 结果导出（供 SWD 读取做 HIL 验收）
- *        magic = 0x54534554 ('TEST') 表示结果已写入。
- */
-typedef struct {
-    uint32_t magic;
-    uint32_t ct_pass, ct_total;
-    uint32_t ct_fail;          /* s_ct_fail 位图 */
-    uint32_t rounds_ok, rounds_total;
-    uint32_t len_ok, len_count;
-    uint32_t str_ok, str_total;
-    uint32_t fl_ok, fl_total;
-    uint32_t fl_last_result;     /* 失败时的 W25QXX_Result */
-    uint32_t fl_fail_round;      /* 失败所在轮次 */
-    uint32_t erase_count;        /* 实际物理扇区擦除次数（安全模式下严格为 0） */
-    uint32_t rec_ok;
-    uint32_t ll_recover_count;   /* LL 层恢复调用次数 */
-    int32_t  ll_last_error;      /* LL 层最后一次错误码 */
-    uint32_t owner_null;       /* 结束时 owner == NULL */
-    uint32_t depth_zero;       /* 结束时 depth == 0 */
-    uint32_t pass;             /* 总体 PASS */
-    uint32_t elapsed_ms;
-    /* Stage 1.2 安全与诊断字段 */
-    uint32_t test_mode;        /* 0: SAFE/READ-ONLY, 1: DESTRUCTIVE */
-    uint32_t test_sector_addr; /* 经确认的测试扇区物理地址 */
-    uint32_t rounds_fail_stage;
-    uint32_t rounds_fail_tx0;
-    uint32_t rounds_fail_rx0;
-    /* Stage 1.2-B: 数据一致性校验扩展统计 */
-    uint32_t read_ok;               /* 读取接口成功次数 */
-    uint32_t data_match_ok;        /* 数据重复读取一致次数 */
-    uint32_t data_mismatch;        /* 数据不一致次数 */
-    uint32_t first_mismatch_offset;/* 首个不一致字节偏移 */
-    int32_t  last_flash_error;     /* 最后一次 Flash 错误码 */
-    /* Stage 1.2-C 扩展字段 */
-    uint32_t reference_valid;       /* 预读取基准有效性: bit0=ref_256, bit1=ref_buf, 0x03=全部有效 */
-    uint32_t expected_256_valid;    /* 预期恢复基准是否有效（写入失败时置 0） */
-} app_test_result_t;
 
 volatile app_test_result_t g_app_test_result;
 
@@ -892,4 +943,26 @@ void AppBusTest(void)
     LCD_ShowString(&g_lcd, 68, 178, line, YELLOW, BLACK, 16, 0);
     LCD_ShowString(&g_lcd, 96, 199, pass ? "PASS" : "FAIL",
                    pass ? GREEN : RED, BLACK, 24, 0);
+}
+
+void AppHIL_Init(void)
+{
+    AppTFT_DiagInit();
+}
+
+void AppHIL_Run(void)
+{
+    AppTFT_DiagInit();
+    LCD_Result tft_res = GC9A01_PortInit();
+    W25QXX_PortInit();
+    if (tft_res == LCD_OK) {
+        AppTFT_Test();
+    }
+    AppFlash_Test();
+    AppBusTest();
+}
+
+void AppHIL_Task(void)
+{
+    AppTFT_Task();
 }

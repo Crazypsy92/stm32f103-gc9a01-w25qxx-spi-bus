@@ -1,14 +1,18 @@
 # 构建产物
 build/
-tests/host/build/
+tests/host/build*/
 *.o
 *.d
 *.elf
 *.bin
 *.hex
 *.map
+*.log
 
 # 编辑器 / IDE 本地文件
 .settings/
 .cache/
 .trae/
+.vscode/
+.idea/
+.DS_Store

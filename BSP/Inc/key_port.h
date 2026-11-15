@@ -1,57 +1,69 @@
 /**
  * @file key_port.h
- * @brief 按键驱动接口头文件（裸机版）
- * @details 定义按键硬件接口及函数声明，基于 multi_button 状态机实现。
- *          事件通过回调向上层传递，不依赖 RTOS 任务、队列或信号量。
- * @author 西伯利亚小菜狗
- * @version 3.0 (bare-metal)
+ * @brief 单按键驱动接口头文件（KEY1 / PB12）
+ * @details 基于 multi_button 状态机实现 KEY1 (PB12) 短按与长按检测。
+ *          PB14 已完全释放给 SPI2_MISO，本工程无 KEY2。
+ *          LED (PC13) 提供按键操作的瞬态状态指示。
  */
 
 #ifndef __KEY_PORT_H_
 #define __KEY_PORT_H_
 
-#include "main.h"
 #include <stdint.h>
-#include "multi_button.h"
-
-/** @defgroup KEY_CONFIG 按键硬件配置 @{ */
-#define KEY_ID_1    1   /**< key1: PB12 */
-#define KEY_ID_2    2   /**< key2: PB14 */
-/** @} */
+#include "main.h"
 
 /**
- * @brief 按键初始化
- * @details 驱动内部完成按键与 LED 的 GPIO 初始化（不依赖 CubeMX），
- *          初始化 multi_button 对象并绑定事件回调。
- *          需在 Timebase_Init() 之后调用。
+ * @brief 按键事件枚举
+ */
+typedef enum {
+    KEY_EVENT_NONE = 0, /**< 无事件 */
+    KEY_EVENT_SHORT,    /**< 短按单击 */
+    KEY_EVENT_LONG,     /**< 长按触发 (~1000ms) */
+} key_event_t;
+
+/**
+ * @brief 按键与 LED 初始化
+ * @note  配置 PB12 上拉输入、PC13 推挽输出，并启动 multi_button
  */
 void KEY_Init(void);
 
 /**
- * @brief 读取按键引脚电平（供 multi_button 调用）
- * @param[in] button_id 按键 ID（KEY_ID_x）
+ * @brief 按键心跳扫描任务
+ * @details 内部自带 5ms 定时节拍，应在主循环中无阻塞周期性调用
+ */
+void KEY_Task(void);
+
+/**
+ * @brief 读取并消费当前按键事件
+ * @return 待处理的按键事件（调用后内部自动清除）
+ */
+key_event_t KEY_GetEvent(void);
+
+/**
+ * @brief 获取 PB12 当前实时物理电平
  * @retval 0 按下（低电平）; 1 释放（高电平）
  */
-uint8_t Read_Pin_Level(uint8_t button_id);
+uint8_t KEY_GetRawLevel(void);
 
 /**
- * @brief 按键事件统一回调函数
- * @details 在主循环调用 button_ticks() 的上下文中执行（非中断上下文），
- *          只做极短的事件记录，不阻塞、不使用队列
+ * @brief 获取累计短按次数
  */
-void Key_Common_Callback(Button *btn);
+uint32_t KEY_GetClickCount(void);
 
 /**
- * @brief 处理本轮扫描产生的按键业务动作
- * @details 由主循环在 button_ticks() 返回后调用：
- *          KEY1 单击点亮 LED，KEY2 单击熄灭 LED。
+ * @brief 获取累计长按次数
  */
-void Key_ProcessEvents(void);
+uint32_t KEY_GetLongCount(void);
 
-/** @brief 获取指定按键的单击累计次数（供应用层/显示验证使用） */
-uint8_t Key_GetClickCount(uint8_t id);
+/**
+ * @brief 控制板载 LED (PC13)
+ * @param on 1=点亮 (低电平), 0=熄灭 (高电平)
+ */
+void KEY_SetLED(uint8_t on);
 
-/** @brief 获取指定按键的长按触发累计次数（供应用层/显示验证使用） */
-uint8_t Key_GetLongCount(uint8_t id);
+/**
+ * @brief 翻转板载 LED (PC13)
+ */
+void KEY_ToggleLED(void);
 
 #endif /* __KEY_PORT_H_ */
