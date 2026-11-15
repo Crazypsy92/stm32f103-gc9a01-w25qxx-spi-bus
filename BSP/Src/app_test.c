@@ -48,6 +48,9 @@ typedef struct {
     uint32_t data_mismatch;        /* 数据不一致次数 */
     uint32_t first_mismatch_offset;/* 首个不一致字节偏移 */
     int32_t  last_flash_error;     /* 最后一次 Flash 错误码 */
+    /* Stage 1.2-C 扩展字段 */
+    uint32_t reference_valid;       /* 预读取基准有效性: bit0=ref_256, bit1=ref_buf, 0x03=全部有效 */
+    uint32_t expected_256_valid;    /* 预期恢复基准是否有效（写入失败时置 0） */
 } app_test_result_t;
 
 volatile app_test_result_t g_app_test_result;
@@ -280,11 +283,29 @@ void AppBusTest(void)
     uint32_t first_mismatch_offset = 0xFFFFFFFFU;
     int32_t  last_flash_error = 0;
 
+    /* Stage 1.2-C 基准有效性与动态预期数据维护 */
+    uint32_t reference_valid = 0U;
+    static uint8_t expected_256[BUS_TEST_LEN];
+    uint8_t expected_256_valid = 0U;
+
     LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, BLACK);
 
-    /* ---------------- 0. 预读取基准数据（用于安全模式下的无损重复校验） ---------------- */
-    (void)W25QXX_Read(&g_flash, ref_256, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN);
-    (void)W25QXX_Read(&g_flash, ref_buf, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_BUF);
+    /* ---------------- 0. 预读取基准数据（用于安全模式与恢复检验的基准校验） ---------------- */
+    W25QXX_Result r256_res = W25QXX_Read(&g_flash, ref_256, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN);
+    if (r256_res == W25QXX_OK) {
+        reference_valid |= 0x01U;
+        memcpy(expected_256, ref_256, BUS_TEST_LEN);
+        expected_256_valid = 1U;
+    } else {
+        last_flash_error = (int32_t)r256_res;
+    }
+
+    W25QXX_Result rbuf_res = W25QXX_Read(&g_flash, ref_buf, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_BUF);
+    if (rbuf_res == W25QXX_OK) {
+        reference_valid |= 0x02U;
+    } else {
+        last_flash_error = (int32_t)rbuf_res;
+    }
 
     /* ---------------- 1. 契约检查（纯状态机断言，与物理 Flash 擦写无关） ---------------- */
     BSP_SPI1_PreemptProbe_Init();
@@ -410,19 +431,30 @@ void AppBusTest(void)
         }
         if (W25QXX_Write(&g_flash, tx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN) != W25QXX_OK) {
             g_app_test_result.rounds_fail_stage = 1;
+            expected_256_valid = 0U;
             break;
         }
         erase_count++;
         if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN) != W25QXX_OK) {
             g_app_test_result.rounds_fail_stage = 2;
+            expected_256_valid = 0U;
             break;
         }
         if (memcmp(rx, tx, BUS_TEST_LEN) != 0) {
             g_app_test_result.rounds_fail_stage = 3;
+            expected_256_valid = 0U;
             break;
         }
+        /* 破坏性模式：成功写入并校验后，更新最新有效基准 */
+        memcpy(expected_256, tx, BUS_TEST_LEN);
+        expected_256_valid = 1U;
 #else
-        /* 安全模式：纯非破坏性读取，并与基准数据逐字节比对，在 20kHz 中断压力下验证总线仲裁与数据稳定性 */
+        /* 安全模式：若基准无效，禁止进行未初始化内存比对，直接标记失败 */
+        if ((reference_valid & 0x01U) == 0U) {
+            g_app_test_result.rounds_fail_stage = 1;
+            break;
+        }
+        /* 纯非破坏性读取，并与基准数据逐字节比对，在 20kHz 中断压力下验证总线仲裁与数据稳定性 */
         if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN) != W25QXX_OK) {
             g_app_test_result.rounds_fail_stage = 2;
             break;
@@ -446,6 +478,8 @@ void AppBusTest(void)
         }
         if (W25QXX_Write(&g_flash, tx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_BUF) == W25QXX_OK) {
             erase_count++;
+            memcpy(expected_256, tx, BUS_TEST_LEN);
+            expected_256_valid = 1U;
             for (uint8_t li = 0; li < len_count; li++) {
                 uint16_t L = len_list[li];
                 memset(rx, 0, L);
@@ -454,15 +488,19 @@ void AppBusTest(void)
                     len_ok++;
                 }
             }
+        } else {
+            expected_256_valid = 0U;
         }
 #else
-        /* 安全模式：按长度矩阵读取，并与 480B 基准的前缀数据比对完整缓冲区 */
-        for (uint8_t li = 0; li < len_count; li++) {
-            uint16_t L = len_list[li];
-            memset(rx, 0, L);
-            if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, L) == W25QXX_OK &&
-                memcmp(rx, ref_buf, L) == 0) {
-                len_ok++;
+        /* 安全模式：仅当 480B 基准有效时才核对数据 */
+        if ((reference_valid & 0x02U) != 0U) {
+            for (uint8_t li = 0; li < len_count; li++) {
+                uint16_t L = len_list[li];
+                memset(rx, 0, L);
+                if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, L) == W25QXX_OK &&
+                    memcmp(rx, ref_buf, L) == 0) {
+                    len_ok++;
+                }
             }
         }
 #endif
@@ -471,14 +509,25 @@ void AppBusTest(void)
     /* ---------------- 4. 1000 次 SPI 事务压力（独立统计通信成功与数据一致性） ---------------- */
     {
         uint16_t k;
-        uint8_t ref_byte = ref_buf[0];
+        uint8_t ref_byte = 0U;
+#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
+        uint8_t valid_for_stress = expected_256_valid;
+        if (valid_for_stress != 0U) {
+            ref_byte = expected_256[0];
+        }
+#else
+        uint8_t valid_for_stress = ((reference_valid & 0x02U) != 0U) ? 1U : 0U;
+        if (valid_for_stress != 0U) {
+            ref_byte = ref_buf[0];
+        }
+#endif
 
         for (k = 0; k < STRESS_TXN; k++) {
             uint8_t b = 0U;
             W25QXX_Result res = W25QXX_Read(&g_flash, &b, FLASH_SAFE_TEST_SECTOR_ADDR, 1U);
             if (res == W25QXX_OK) {
                 read_ok++;
-                if (b == ref_byte) {
+                if (valid_for_stress != 0U && b == ref_byte) {
                     data_match_ok++;
                     str_ok++;
                 } else {
@@ -504,15 +553,28 @@ void AppBusTest(void)
             }
             memset(rx, 0x55, BUS_TEST_LEN);
             wr = W25QXX_Write(&g_flash, tx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN);
-            if (wr != W25QXX_OK) { g_app_test_result.fl_fail_round = k; g_app_test_result.fl_last_result = (uint32_t)wr; break; }
+            if (wr != W25QXX_OK) {
+                g_app_test_result.fl_fail_round = k;
+                g_app_test_result.fl_last_result = (uint32_t)wr;
+                expected_256_valid = 0U;
+                break;
+            }
             erase_count++;
             rr = W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN);
-            if (rr != W25QXX_OK) { g_app_test_result.fl_fail_round = k; g_app_test_result.fl_last_result = (uint32_t)rr; break; }
+            if (rr != W25QXX_OK) {
+                g_app_test_result.fl_fail_round = k;
+                g_app_test_result.fl_last_result = (uint32_t)rr;
+                expected_256_valid = 0U;
+                break;
+            }
             if (memcmp(rx, tx, BUS_TEST_LEN) != 0) {
                 g_app_test_result.fl_fail_round = k;
+                expected_256_valid = 0U;
                 break;
             }
             fl_ok++;
+            memcpy(expected_256, tx, BUS_TEST_LEN);
+            expected_256_valid = 1U;
         }
     }
 #else
@@ -523,8 +585,9 @@ void AppBusTest(void)
     {
         if (BSP_SPI1_Recover() == 0) {
             memset(rx, 0, BUS_TEST_LEN);
-            if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN) == W25QXX_OK &&
-                memcmp(rx, ref_256, BUS_TEST_LEN) == 0) {
+            if (expected_256_valid != 0U &&
+                W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN) == W25QXX_OK &&
+                memcmp(rx, expected_256, BUS_TEST_LEN) == 0) {
                 rec_ok = 1;
             }
         }
@@ -544,6 +607,7 @@ void AppBusTest(void)
 
 #if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
     pass = (ct_pass == ct_total) &&
+           (reference_valid == 0x03U) &&
            (rounds_ok == BUS_TEST_ROUNDS) &&
            (len_ok == len_count) &&
            (str_ok == STRESS_TXN) &&
@@ -557,6 +621,7 @@ void AppBusTest(void)
            (depth_after == 0U);
 #else
     pass = (ct_pass == ct_total) &&
+           (reference_valid == 0x03U) &&
            (rounds_ok == BUS_TEST_ROUNDS) &&
            (len_ok == len_count) &&
            (str_ok == STRESS_TXN) &&
@@ -599,6 +664,9 @@ void AppBusTest(void)
     g_app_test_result.data_mismatch         = data_mismatch;
     g_app_test_result.first_mismatch_offset = first_mismatch_offset;
     g_app_test_result.last_flash_error      = last_flash_error;
+    /* Stage 1.2-C 扩展字段 */
+    g_app_test_result.reference_valid       = reference_valid;
+    g_app_test_result.expected_256_valid    = expected_256_valid;
 
     LCD_ShowString(&g_lcd, 12, 12, "BUS RELIABILITY TEST", CYAN, BLACK, 16, 0);
 
@@ -624,9 +692,12 @@ void AppBusTest(void)
 #endif
     LCD_ShowString(&g_lcd, 12, 104, line, WHITE, BLACK, 16, 0);
 
-    snprintf(line, sizeof(line), "REC:%s ID:%s",
-             rec_ok ? "OK" : "FAIL", id_match ? "OK" : "FAIL");
-    LCD_ShowString(&g_lcd, 12, 128, line, (rec_ok && id_match) ? GREEN : RED, BLACK, 16, 0);
+    snprintf(line, sizeof(line), "REC:%s ID:%s REF:%s",
+             rec_ok ? "OK" : "FAIL", id_match ? "OK" : "FAIL",
+             (reference_valid == 0x03U) ? "OK" : "ERR");
+    LCD_ShowString(&g_lcd, 12, 128, line,
+                   (rec_ok && id_match && (reference_valid == 0x03U)) ? GREEN : RED,
+                   BLACK, 16, 0);
 
     snprintf(line, sizeof(line), "OWNER:%s DEPTH:%u",
              (owner_after == NULL) ? "NULL" : "LEFT", (unsigned)depth_after);

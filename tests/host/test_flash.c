@@ -63,6 +63,7 @@ typedef struct {
     uint8_t status_reg;        /* bit0: BUSY, bit1: WEL */
     spi_state_t state;
     uint8_t current_cmd;
+    uint8_t last_command;      /* 最近一次下发的 SPI 指令 */
     uint32_t current_addr;
     uint16_t id;
     int cs_asserted;           /* 模拟硬件 CS 引脚状态：1=拉低选中，0=拉高释放 */
@@ -70,14 +71,17 @@ typedef struct {
     /* 故障注入开关 */
     int inject_cs_low_fail;
     int inject_cs_high_fail;       /* CS 释放失败注入（模拟硬件引脚或总线释放被拒） */
+    uint8_t inject_cs_high_fail_on_cmd; /* 针对特定命令末尾注入 CS_HIGH 失败 */
     int inject_swap_fail;
     int inject_wel_fail;           /* WREN 后 WEL 保持为 0 */
     int inject_busy_timeout;       /* BUSY 保持为 1 */
     int inject_status_reg_swap_err;/* 读状态寄存器时 swap 报错 */
 
-    /* 统计 */
+    /* 统计与追踪 */
+    uint32_t cs_high_call_count;   /* CS 释放调用次数 */
     uint32_t erase_sector_count;
     uint32_t page_program_count;
+    uint8_t  fault_injected_at;    /* 实际触发故障时的指令代码 */
 } mock_flash_ctx_t;
 
 static mock_flash_ctx_t s_mock_ctx;
@@ -113,12 +117,23 @@ static int mock_bus_cs_low(void *ctx)
 static int mock_bus_cs_high(void *ctx)
 {
     mock_flash_ctx_t *m = (mock_flash_ctx_t *)ctx;
+    m->cs_high_call_count++;
+
+    int fail = 0;
     if (m->inject_cs_high_fail) {
+        fail = 1;
+    } else if (m->inject_cs_high_fail_on_cmd != 0 && m->current_cmd == m->inject_cs_high_fail_on_cmd) {
+        fail = 1;
+    }
+
+    if (fail) {
+        m->fault_injected_at = m->current_cmd;
         /* 模拟物理 CS 释放失败，引脚维持低电平（未释放），总线被占用 */
         return -1;
     }
     m->cs_asserted = 0;
     m->state = SPI_STATE_IDLE;
+    m->current_cmd = 0;
     return 0;
 }
 
@@ -137,6 +152,7 @@ static int mock_bus_swap(void *ctx, uint8_t tx, uint8_t *rx)
     switch (m->state) {
         case SPI_STATE_CMD:
             m->current_cmd = tx;
+            m->last_command = tx;
             if (tx == W25X_ManufactDeviceID) {
                 m->state = SPI_STATE_READ_ID_DUMMY0;
             } else if (tx == W25X_ReadStatusReg) {
@@ -482,11 +498,11 @@ static void test_page_and_sector_cross_write(void)
 }
 
 /* ====================================================================
- * Stage 1.2-B Task 2: 片选释放 (CS_HIGH) 失败全链路故障注入测试 (T01 ~ T08)
+ * Stage 1.2-B & 1.2-C Task 1: 片选释放 (CS_HIGH) 精确故障注入测试 (T01 ~ T08)
  * ==================================================================== */
 static void test_cs_high_failure_injection(void)
 {
-    printf("\n=== Test 6 (Stage 1.2-B): CS_HIGH Failure Injection (T01 ~ T08) ===\n");
+    printf("\n=== Test 6 (Stage 1.2-B/C): CS_HIGH Failure Injection (T01 ~ T08) ===\n");
     mock_flash_reset();
     W25QXX_Device dev;
     W25QXX_Init(&dev, &s_mock_bus);
@@ -496,49 +512,72 @@ static void test_cs_high_failure_injection(void)
     /* T01: ReadStatusReg 结束时 CS 释放失败 -> 必须返回 ERROR_BUS，且不得提交状态结果 */
     {
         uint8_t status = 0x55U;
-        s_mock_ctx.inject_cs_high_fail = 1;
+        s_mock_ctx.inject_cs_high_fail_on_cmd = W25X_ReadStatusReg;
         W25QXX_Result r = W25QXX_ReadStatusReg(&dev, &status);
         TEST_ASSERT(r == W25QXX_ERROR_BUS, "T01: ReadStatusReg returns ERROR_BUS when CS_HIGH fails");
         TEST_ASSERT(status == 0x55U, "T01: ReadStatusReg does not commit result to output buffer on CS_HIGH failure");
-        s_mock_ctx.inject_cs_high_fail = 0;
+        TEST_ASSERT(s_mock_ctx.fault_injected_at == W25X_ReadStatusReg, "T01: Fault injected precisely at ReadStatusReg");
+        TEST_ASSERT(s_mock_ctx.cs_asserted == 1, "T01: CS pin remains asserted on failure");
+        s_mock_ctx.inject_cs_high_fail_on_cmd = 0;
         s_mock_ctx.cs_asserted = 0;
+        s_mock_ctx.current_cmd = 0;
     }
 
     /* T02: Read 数据结束时 CS 释放失败 -> 禁止返回 OK (返回 ERROR_BUS) */
     {
-        s_mock_ctx.inject_cs_high_fail = 1;
+        s_mock_ctx.inject_cs_high_fail_on_cmd = W25X_ReadData;
         W25QXX_Result r = W25QXX_Read(&dev, buf, 0x1000, 32);
         TEST_ASSERT(r == W25QXX_ERROR_BUS, "T02: Read returns ERROR_BUS and NEVER returns OK when CS_HIGH fails");
-        s_mock_ctx.inject_cs_high_fail = 0;
+        TEST_ASSERT(s_mock_ctx.fault_injected_at == W25X_ReadData, "T02: Fault injected precisely at ReadData");
+        TEST_ASSERT(s_mock_ctx.cs_asserted == 1, "T02: CS pin remains asserted on failure");
+        s_mock_ctx.inject_cs_high_fail_on_cmd = 0;
         s_mock_ctx.cs_asserted = 0;
+        s_mock_ctx.current_cmd = 0;
     }
 
     /* T03: WriteEnable 结束时 CS 释放失败 -> 返回 ERROR_BUS，禁止继续下发编程 */
     {
         s_mock_ctx.page_program_count = 0;
-        s_mock_ctx.inject_cs_high_fail = 1;
+        s_mock_ctx.inject_cs_high_fail_on_cmd = W25X_WriteEnable;
         W25QXX_Result r = W25QXX_WriteEnable(&dev);
         TEST_ASSERT(r == W25QXX_ERROR_BUS, "T03: WriteEnable returns ERROR_BUS when CS_HIGH fails");
-        s_mock_ctx.inject_cs_high_fail = 0;
+        TEST_ASSERT(s_mock_ctx.fault_injected_at == W25X_WriteEnable, "T03: Fault injected precisely at WriteEnable");
+        TEST_ASSERT(s_mock_ctx.cs_asserted == 1, "T03: CS pin remains asserted on failure");
+        s_mock_ctx.inject_cs_high_fail_on_cmd = 0;
         s_mock_ctx.cs_asserted = 0;
+        s_mock_ctx.current_cmd = 0;
     }
 
-    /* T04: Page Program 结束时 CS 释放失败 -> 不得报告编程成功 */
+    /* T04: Page Program 结束时 CS 释放失败 -> 确认指令和数据已发送，注入最终释放失败，且不得报告成功 */
     {
-        s_mock_ctx.inject_cs_high_fail = 1;
+        s_mock_ctx.page_program_count = 0;
+        s_mock_ctx.fault_injected_at = 0;
+        s_mock_ctx.inject_cs_high_fail_on_cmd = W25X_PageProgram;
         W25QXX_Result r = W25QXX_Write_NoCheck(&dev, buf, 0x1000, 64);
-        TEST_ASSERT(r == W25QXX_ERROR_BUS, "T04: Write_NoCheck returns ERROR_BUS and reports NO success on CS_HIGH fail");
-        s_mock_ctx.inject_cs_high_fail = 0;
+        TEST_ASSERT(r == W25QXX_ERROR_BUS, "T04: Write_NoCheck returns ERROR_BUS on PageProgram CS_HIGH fail");
+        TEST_ASSERT(s_mock_ctx.page_program_count == 1, "T04: Page Program command & data were actually transferred");
+        TEST_ASSERT(s_mock_ctx.last_command == W25X_PageProgram, "T04: Last command was W25X_PageProgram");
+        TEST_ASSERT(s_mock_ctx.fault_injected_at == W25X_PageProgram, "T04: Fault injected precisely at PageProgram CS_HIGH");
+        TEST_ASSERT(s_mock_ctx.cs_asserted == 1, "T04: CS hardware line remains asserted");
+        s_mock_ctx.inject_cs_high_fail_on_cmd = 0;
         s_mock_ctx.cs_asserted = 0;
+        s_mock_ctx.current_cmd = 0;
     }
 
-    /* T05: Sector Erase 结束时 CS 释放失败 -> 不得报告擦除成功 */
+    /* T05: Sector Erase 结束时 CS 释放失败 -> 确认擦除指令和地址已发送，注入最终释放失败，且不得报告成功 */
     {
-        s_mock_ctx.inject_cs_high_fail = 1;
+        s_mock_ctx.erase_sector_count = 0;
+        s_mock_ctx.fault_injected_at = 0;
+        s_mock_ctx.inject_cs_high_fail_on_cmd = W25X_SectorErase;
         W25QXX_Result r = W25QXX_EraseSector(&dev, 0x1000);
-        TEST_ASSERT(r == W25QXX_ERROR_BUS, "T05: EraseSector returns ERROR_BUS and reports NO success on CS_HIGH fail");
-        s_mock_ctx.inject_cs_high_fail = 0;
+        TEST_ASSERT(r == W25QXX_ERROR_BUS, "T05: EraseSector returns ERROR_BUS on SectorErase CS_HIGH fail");
+        TEST_ASSERT(s_mock_ctx.erase_sector_count == 1, "T05: Sector Erase command & address were actually transferred");
+        TEST_ASSERT(s_mock_ctx.last_command == W25X_SectorErase, "T05: Last command was W25X_SectorErase");
+        TEST_ASSERT(s_mock_ctx.fault_injected_at == W25X_SectorErase, "T05: Fault injected precisely at SectorErase CS_HIGH");
+        TEST_ASSERT(s_mock_ctx.cs_asserted == 1, "T05: CS hardware line remains asserted");
+        s_mock_ctx.inject_cs_high_fail_on_cmd = 0;
         s_mock_ctx.cs_asserted = 0;
+        s_mock_ctx.current_cmd = 0;
     }
 
     /* T06: 检查故障发生时 CS 状态未被无声掩盖 */
@@ -549,6 +588,7 @@ static void test_cs_high_failure_injection(void)
         s_mock_ctx.inject_cs_high_fail = 0;
         /* 安全复位片选 */
         s_mock_ctx.cs_asserted = 0;
+        s_mock_ctx.current_cmd = 0;
     }
 
     /* T07: 故障恢复后重新访问，状态有效时才允许通信 */
@@ -641,10 +681,126 @@ static void test_repeated_read_data_consistency(void)
     TEST_ASSERT(matrix_ok == len_count, "All 10 lengths in matrix match byte-for-byte with reference data");
 }
 
+/* ====================================================================
+ * Stage 1.2-C Task 2 & Task 3: 基准有效性检验与破坏性模式最新有效基准跟踪测试
+ * ==================================================================== */
+static void test_baseline_and_destructive_tracking(void)
+{
+    printf("\n=== Test 8 (Stage 1.2-C): Baseline Validity & Destructive Tracking ===\n");
+    mock_flash_reset();
+    W25QXX_Device dev;
+    W25QXX_Init(&dev, &s_mock_bus);
+
+    uint8_t ref_256[256];
+    uint8_t ref_buf[480];
+    uint8_t rx[480];
+    uint8_t expected_256[256];
+
+    /* 预填充测试扇区 */
+    for (uint32_t i = 0; i < 480; i++) {
+        s_mock_flash_mem[0x00100000U + i] = (uint8_t)(i ^ 0x33U);
+    }
+
+    /* 场景 1: 首个 256B 基准读取失败 -> reference_valid bit0 未置位，安全测试被拒绝 */
+    {
+        uint32_t reference_valid = 0U;
+        s_mock_ctx.inject_swap_fail = 1; /* 注入通信故障 */
+        W25QXX_Result r1 = W25QXX_Read(&dev, ref_256, 0x00100000U, 256);
+        if (r1 == W25QXX_OK) reference_valid |= 0x01U;
+        s_mock_ctx.inject_swap_fail = 0;
+
+        TEST_ASSERT(r1 != W25QXX_OK, "Scenario 1: 256B baseline read failed as injected");
+        TEST_ASSERT((reference_valid & 0x01U) == 0, "Scenario 1: reference_valid bit0 is NOT set");
+        TEST_ASSERT(reference_valid != 0x03U, "Scenario 1: Total test condition (reference_valid == 0x03) fails");
+    }
+
+    /* 场景 2: 480B 基准读取失败 -> reference_valid bit1 未置位，长度矩阵比对被阻止 */
+    {
+        uint32_t reference_valid = 0U;
+        W25QXX_Result r1 = W25QXX_Read(&dev, ref_256, 0x00100000U, 256);
+        if (r1 == W25QXX_OK) reference_valid |= 0x01U;
+
+        s_mock_ctx.inject_swap_fail = 1;
+        W25QXX_Result r2 = W25QXX_Read(&dev, ref_buf, 0x00100000U, 480);
+        if (r2 == W25QXX_OK) reference_valid |= 0x02U;
+        s_mock_ctx.inject_swap_fail = 0;
+
+        TEST_ASSERT(r1 == W25QXX_OK, "Scenario 2: 256B baseline read succeeds");
+        TEST_ASSERT(r2 != W25QXX_OK, "Scenario 2: 480B baseline read fails as injected");
+        TEST_ASSERT((reference_valid & 0x01U) == 0x01U, "Scenario 2: bit0 is set");
+        TEST_ASSERT((reference_valid & 0x02U) == 0, "Scenario 2: bit1 is NOT set");
+        TEST_ASSERT(reference_valid != 0x03U, "Scenario 2: Test fails because 480B baseline is invalid");
+    }
+
+    /* 场景 3: 两次读取均成功 -> reference_valid == 0x03 */
+    {
+        uint32_t reference_valid = 0U;
+        W25QXX_Result r1 = W25QXX_Read(&dev, ref_256, 0x00100000U, 256);
+        if (r1 == W25QXX_OK) reference_valid |= 0x01U;
+
+        W25QXX_Result r2 = W25QXX_Read(&dev, ref_buf, 0x00100000U, 480);
+        if (r2 == W25QXX_OK) reference_valid |= 0x02U;
+
+        TEST_ASSERT(r1 == W25QXX_OK && r2 == W25QXX_OK, "Scenario 3: Both baseline reads succeed");
+        TEST_ASSERT(reference_valid == 0x03U, "Scenario 3: reference_valid is 0x03 (fully valid)");
+        TEST_ASSERT(memcmp(ref_256, ref_buf, 256) == 0, "Scenario 3: 256B and 480B baseline prefixes match");
+    }
+
+    /* 场景 4: 破坏性模式下，写更新后的动态基准跟踪与恢复测试比对 */
+    {
+        uint8_t expected_256_valid = 0U;
+        uint8_t tx_new[256];
+        for (uint16_t i = 0; i < 256; i++) {
+            tx_new[i] = (uint8_t)(i ^ 0x77U);
+        }
+
+        /* 初始基准 */
+        memcpy(expected_256, ref_256, 256);
+        expected_256_valid = 1U;
+
+        /* 模拟擦除并写入新数据 */
+        TEST_ASSERT(W25QXX_EraseSector(&dev, 0x00100000U) == W25QXX_OK, "Scenario 4: EraseSector ok");
+        TEST_ASSERT(W25QXX_Write_NoCheck(&dev, tx_new, 0x00100000U, 256) == W25QXX_OK, "Scenario 4: Write new pattern ok");
+        TEST_ASSERT(W25QXX_Read(&dev, rx, 0x00100000U, 256) == W25QXX_OK, "Scenario 4: Read new pattern ok");
+        TEST_ASSERT(memcmp(rx, tx_new, 256) == 0, "Scenario 4: Written data verified");
+
+        /* 成功写入并校验后，更新 expected_256 为最新数据 */
+        memcpy(expected_256, tx_new, 256);
+        expected_256_valid = 1U;
+
+        /* 恢复测试：比对最新基准 expected_256 (若比对旧 ref_256 将失败) */
+        TEST_ASSERT(memcmp(rx, ref_256, 256) != 0, "Scenario 4: Flash data no longer matches stale baseline");
+        uint8_t rec_ok = 0;
+        if (expected_256_valid != 0U &&
+            W25QXX_Read(&dev, rx, 0x00100000U, 256) == W25QXX_OK &&
+            memcmp(rx, expected_256, 256) == 0) {
+            rec_ok = 1;
+        }
+        TEST_ASSERT(rec_ok == 1, "Scenario 4: Recovery verification PASS with latest valid data");
+
+        /* 模拟写入中途失败：expected_256_valid 置 0，恢复测试必须拒绝误报成功 */
+        s_mock_ctx.inject_cs_high_fail_on_cmd = W25X_PageProgram;
+        W25QXX_Result fail_wr = W25QXX_Write_NoCheck(&dev, tx_new, 0x00100000U, 256);
+        if (fail_wr != W25QXX_OK) {
+            expected_256_valid = 0U; /* 写入失败，标记预期数据失效 */
+        }
+        s_mock_ctx.inject_cs_high_fail_on_cmd = 0;
+        s_mock_ctx.cs_asserted = 0;
+
+        rec_ok = 0;
+        if (expected_256_valid != 0U &&
+            W25QXX_Read(&dev, rx, 0x00100000U, 256) == W25QXX_OK &&
+            memcmp(rx, expected_256, 256) == 0) {
+            rec_ok = 1;
+        }
+        TEST_ASSERT(rec_ok == 0, "Scenario 4: Recovery verification strictly blocked (rec_ok=0) when write failed");
+    }
+}
+
 int main(void)
 {
     printf("====================================================\n");
-    printf("   Stage 1.2 & 1.2-B: W25Q128 Flash Host Tests       \n");
+    printf("   Stage 1.2-C: W25Q128 Flash Host Tests             \n");
     printf("====================================================\n");
 
     test_address_boundary_protection();
@@ -654,6 +810,7 @@ int main(void)
     test_page_and_sector_cross_write();
     test_cs_high_failure_injection();
     test_repeated_read_data_consistency();
+    test_baseline_and_destructive_tracking();
 
     printf("\n====================================================\n");
     printf(" Summary: %d/%d assertions passed (100%% PASS)\n", s_tests_passed, s_tests_run);
