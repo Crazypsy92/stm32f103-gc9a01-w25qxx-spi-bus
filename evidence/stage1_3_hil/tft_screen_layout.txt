@@ -1,0 +1,105 @@
+================================================================================
+Stage 1.3-HIL GC9A01 (240x240 Circular IPS) Display Layout & Text Specification
+================================================================================
+Hardware: 1.28-inch Round LCD (GC9A01), SPI1 Shared Bus, 240x240 Resolution
+Color Depth: RGB565 (16-bit)
+
+--------------------------------------------------------------------------------
+1. Boot Splash Screen (AppTFT_Test)
+--------------------------------------------------------------------------------
+Visual Duration: 1000 ms
+Background: BLACK (0x0000)
+Boundary: Circle centered at (120, 120), radius 113 px, DARKBLUE (0x0010)
+
+ASCII Screen Map (Circular Screen Projection):
+                 .---------------------.
+              .-'                       '-.
+            .'          SPI1 LAB           '.       <-- (68, 34) CYAN 24pt
+           /                                 \
+          |            STM32F103C8            |     <-- (60, 84) WHITE 16pt
+         |            GC9A01 W25Q128           |    <-- (52, 109) LGRAY 16pt
+         |             DMA + FLASH             |    <-- (70, 136) WHITE 16pt
+         |                                     |
+         |         [RED] [GREEN] [BLUE]        |    <-- (75..165, 166..173) RGB Bars
+          |             SELF TEST             |     <-- (80, 187) GREEN 16pt
+           \                                 /
+            '.                             .'
+              '-.                       .-'
+                 '---------------------'
+
+Element Details:
+- Title: "SPI1 LAB" at (68, 34), Color: CYAN (0x7FFF), Font: 24pt
+- Target MCU: "STM32F103C8" at (60, 84), Color: WHITE (0xFFFF), Font: 16pt
+- Peripherals: "GC9A01 W25Q128" at (52, 109), Color: LGRAY (0xC618), Font: 16pt
+- Bus Features: "DMA + FLASH" at (70, 136), Color: WHITE (0xFFFF), Font: 16pt
+- RGB Color Verification Bar:
+  * RED block: (75, 166) to (105, 173) [30x8 px]
+  * GREEN block: (105, 166) to (135, 173) [30x8 px]
+  * BLUE block: (135, 166) to (165, 173) [30x8 px]
+- Status: "SELF TEST" at (80, 187), Color: GREEN (0x07E0), Font: 16pt
+
+--------------------------------------------------------------------------------
+2. Dual Bus Alternating Screen (AppFlash_Test - Stage 1.3 Task 4)
+--------------------------------------------------------------------------------
+Visual Duration: ~800 ms
+Background: BLACK (0x0000)
+Boundary: Circle centered at (120, 120), radius 113 px, DARKBLUE (0x0010)
+
+ASCII Screen Map:
+                 .---------------------.
+              .-'                       '-.
+            .'         DUAL BUS TEST       '.       <-- (64, 25) CYAN 16pt
+           /           TFT + W25Q128         \      <-- (68, 50) WHITE 16pt
+          |             ROUNDS:20/20          |     <-- (68, 75) WHITE 16pt
+         |              ID:20 DMA:20           |    <-- (64, 98) WHITE 16pt
+         |                                     |
+         |       [][][][][][][][][][]          |    <-- (24..214, 140..152) 10x Green Blocks
+         |       [][][][][][][][][][]          |    <-- (24..214, 156..168) 10x Green Blocks
+          |            DUAL PASS 55ms         |     <-- (72, 180) GREEN 16pt
+           \                                 /
+            '.                             .'
+              '-.                       .-'
+                 '---------------------'
+
+Element Details:
+- Title: "DUAL BUS TEST" at (64, 25), Color: CYAN, Font: 16pt
+- Subtitle: "TFT + W25Q128" at (68, 50), Color: WHITE, Font: 16pt
+- Progress: "ROUNDS:20/20" at (68, 75), Color: WHITE, Font: 16pt
+- Operation Stats: "ID:20 DMA:20" at (64, 98), Color: WHITE, Font: 16pt
+- Graphic Block Grid: 20 rounds of LCD_Fill (15x12 px each) dynamically drawn in GREEN
+- Result: "DUAL PASS 55ms" at (72, 180), Color: GREEN, Font: 16pt
+
+--------------------------------------------------------------------------------
+3. Final Diagnostics Screen (AppBusTest & AppTFT_Task)
+--------------------------------------------------------------------------------
+Visual Duration: Static diagnostic display + Continuous Heartbeat
+Background: BLACK (0x0000)
+Boundary: Circle centered at (120, 120), radius 113 px, DARKBLUE (0x0010)
+
+ASCII Screen Map:
+                 .---------------------.
+              .-'                       '-.
+            .'          SPI1 HEALTH        '.       <-- (72, 22) CYAN 16pt
+           /            W25Q128 16M          \      <-- (68, 48) LGRAY 16pt
+          |           CT:18/18 IRQ:OK         |     <-- (52, 72) WHITE 16pt
+         |               LEN:10/10             |    <-- (72, 94) WHITE 16pt
+         |              RD:1000/1000           |    <-- (64, 114) WHITE 16pt
+         |              EQ:1000/1000           |    <-- (64, 134) WHITE 16pt
+         |             REC:OK REF:OK           |    <-- (64, 154) GREEN 16pt
+          |             SAFE ERASE:0          |     <-- (68, 178) YELLOW 16pt
+           \                PASS             /      <-- (96, 199) GREEN 24pt
+            '.             [HEART]         .'       <-- (108..132, 222..234) Heartbeat
+              '-.                       .-'
+                 '---------------------'
+
+Element Details:
+- Title: "SPI1 HEALTH" at (72, 22), Color: CYAN (0x7FFF), Font: 16pt
+- Chip Info: "W25Q128 16M" at (68, 48), Color: LGRAY (0xC618), Font: 16pt
+- Contracts & ISR: "CT:18/18 IRQ:OK" at (52, 72), Color: WHITE (0xFFFF), Font: 16pt
+- Packet Lengths: "LEN:10/10" at (72, 94), Color: WHITE (0xFFFF), Font: 16pt
+- Read Stress: "RD:1000/1000" at (64, 114), Color: WHITE (0xFFFF), Font: 16pt
+- Data Consistency: "EQ:1000/1000" at (64, 134), Color: WHITE (0xFFFF), Font: 16pt
+- Recovery & Ref: "REC:OK REF:OK" at (64, 154), Color: GREEN (0x07E0), Font: 16pt
+- Erase Safety: "SAFE ERASE:0" at (68, 178), Color: YELLOW (0xFFE0), Font: 16pt
+- Final Verdict: "PASS" at (96, 199), Color: GREEN (0x07E0), Font: 24pt
+- Periodic Heartbeat: Rectangle (108, 222) to (132, 234) toggling RED / BLACK every 500ms

@@ -56,6 +56,26 @@ typedef struct {
 volatile app_test_result_t g_app_test_result;
 
 /**
+ * @brief Stage 1.3 Task 4: SPI 双设备交替访问测试结果导出
+ */
+typedef struct {
+    uint32_t magic;              /* 0x4455414C ('DUAL') */
+    uint32_t rounds_ok;          /* 20 轮交替全成功轮数 */
+    uint32_t rounds_total;       /* 20 */
+    uint32_t id_ok_count;        /* ID 读取成功次数 */
+    uint32_t dma256_ok_count;    /* 256B DMA 校验成功次数 */
+    uint32_t dma480_ok_count;    /* 480B DMA 校验成功次数 */
+    uint32_t tft_update_count;   /* TFT 局部更新成功次数 */
+    uint32_t post_read_ok;       /* TFT 更新后重读 Flash 校验成功次数 */
+    uint32_t owner_null;         /* 结束时 owner == NULL */
+    uint32_t depth_zero;         /* 结束时 depth == 0 */
+    uint32_t pass;               /* 1 = PASS */
+    uint32_t elapsed_ms;
+} app_dual_test_result_t;
+
+volatile app_dual_test_result_t g_app_dual_result;
+
+/**
  * @brief GC9A01 上电显示自测
  */
 void AppTFT_Test(void)
@@ -71,7 +91,7 @@ void AppTFT_Test(void)
     LCD_Fill(&g_lcd, 105, 166, 135, 173, GREEN);
     LCD_Fill(&g_lcd, 135, 166, 165, 173, BLUE);
     LCD_ShowString(&g_lcd, 80, 187, "SELF TEST", GREEN, BLACK, 16, 0);
-    Delay_ms(350);
+    Delay_ms(1000);
 }
 
 /**
@@ -92,126 +112,118 @@ void AppTFT_Task(void)
 }
 
 /**
- * @brief 双设备共享总线测试：TFT 与 W25QXX 交替占用 SPI1
+ * @brief 双设备共享总线测试：TFT 与 W25QXX 交替占用 SPI1 (Stage 1.3 Task 4: 20 轮交替访问)
  * @note  默认安全模式：仅执行非破坏性只读测试，完整核对重复读取数据一致性，绝对不擦除/改写 Flash 数据！
  */
 void AppFlash_Test(void)
 {
-    #define FLASH_TEST_LEN    256U
-    #define FLASH_TEST_ROUNDS 3U
+    #define DUAL_TEST_ROUNDS 20U
+    #define DUAL_TEST_256    256U
+    #define DUAL_TEST_480    480U
 
-#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
-    static uint8_t tx[FLASH_TEST_LEN];
-#endif
-    static uint8_t rx[FLASH_TEST_LEN];
-    static uint8_t ref[FLASH_TEST_LEN];
+    static uint8_t ref_256[DUAL_TEST_256];
+    static uint8_t ref_480[DUAL_TEST_480];
+    static uint8_t rx_256[DUAL_TEST_256];
+    static uint8_t rx_480[DUAL_TEST_480];
     char line[40];
-    uint32_t cap_mb = g_flash.capacity / (1024U * 1024U);
     uint32_t elapsed;
-    uint32_t sum = 0;
-    uint16_t i;
     uint8_t r;
     uint8_t rounds_ok = 0;
+    uint32_t id_ok_count = 0;
+    uint32_t dma256_ok_count = 0;
+    uint32_t dma480_ok_count = 0;
+    uint32_t tft_update_count = 0;
+    uint32_t post_read_ok = 0;
+    spi_bus_t *bus = BSP_SPI1_GetBus();
 
     LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, BLACK);
+    Draw_Circle(&g_lcd, 120, 120, 113, DARKBLUE);
+    LCD_ShowString(&g_lcd, 64, 25, "DUAL BUS TEST", CYAN, BLACK, 16, 0);
+    LCD_ShowString(&g_lcd, 68, 50, "TFT + W25Q128", WHITE, BLACK, 16, 0);
 
     elapsed = GetTick_ms();
 
-#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
-    /* ---- 破坏性测试模式（显式启用）：在经确认的安全扇区进行 3 轮写-读-校验 ---- */
-    if (FLASH_SAFE_TEST_SECTOR_ADDR != 0U &&
-        FLASH_SAFE_TEST_SECTOR_ADDR < g_flash.capacity &&
-        (FLASH_SAFE_TEST_SECTOR_ADDR % W25QXX_SECTOR_SIZE) == 0U)
+    /* 1. 预读取 256B 与 480B 基准数据 */
+    if (W25QXX_Read(&g_flash, ref_256, FLASH_SAFE_TEST_SECTOR_ADDR, DUAL_TEST_256) == W25QXX_OK &&
+        W25QXX_Read(&g_flash, ref_480, FLASH_SAFE_TEST_SECTOR_ADDR, DUAL_TEST_480) == W25QXX_OK)
     {
-        for (i = 0; i < FLASH_TEST_LEN; i++) {
-            tx[i] = (uint8_t)(i ^ 0x5AU);
-        }
-
-        for (r = 0; r < FLASH_TEST_ROUNDS; r++)
+        for (r = 0; r < DUAL_TEST_ROUNDS; r++)
         {
-            tx[0] = r;
-            memset(rx, 0, sizeof(rx));
+            /* 步骤 1: 读 ID */
+            uint16_t id = W25QXX_ReadID(&g_flash);
+            if (id == W25Q128) {
+                id_ok_count++;
+            } else {
+                break;
+            }
 
-            if (W25QXX_Write(&g_flash, tx, FLASH_SAFE_TEST_SECTOR_ADDR, FLASH_TEST_LEN) != W25QXX_OK) {
+            /* 步骤 2: DMA 读取 256B 并校验 */
+            memset(rx_256, 0, DUAL_TEST_256);
+            if (W25QXX_Read(&g_flash, rx_256, FLASH_SAFE_TEST_SECTOR_ADDR, DUAL_TEST_256) == W25QXX_OK &&
+                memcmp(rx_256, ref_256, DUAL_TEST_256) == 0) {
+                dma256_ok_count++;
+            } else {
                 break;
             }
-            if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, FLASH_TEST_LEN) != W25QXX_OK) {
+
+            /* 步骤 3: DMA 读取 480B 并校验 */
+            memset(rx_480, 0, DUAL_TEST_480);
+            if (W25QXX_Read(&g_flash, rx_480, FLASH_SAFE_TEST_SECTOR_ADDR, DUAL_TEST_480) == W25QXX_OK &&
+                memcmp(rx_480, ref_480, DUAL_TEST_480) == 0) {
+                dma480_ok_count++;
+            } else {
                 break;
             }
-            if (memcmp(rx, tx, FLASH_TEST_LEN) != 0) {
+
+            /* 步骤 4: TFT 更新局部图形块（交替占用 SPI1） */
+            LCD_Fill(&g_lcd, 24 + (r % 10) * 19, 140 + (r / 10) * 16,
+                            24 + (r % 10) * 19 + 15, 140 + (r / 10) * 16 + 12, GREEN);
+            tft_update_count++;
+
+            /* 步骤 5: 再次读取 Flash 256B 并校验 */
+            memset(rx_256, 0, DUAL_TEST_256);
+            if (W25QXX_Read(&g_flash, rx_256, FLASH_SAFE_TEST_SECTOR_ADDR, DUAL_TEST_256) == W25QXX_OK &&
+                memcmp(rx_256, ref_256, DUAL_TEST_256) == 0) {
+                post_read_ok++;
+            } else {
                 break;
             }
+
             rounds_ok++;
-            LCD_Fill(&g_lcd, 16 + r * 72, 172, 16 + r * 72 + 56, 216, GREEN);
         }
     }
-#else
-    /* ---- 默认安全模式：基准读取 + 重复读取数据一致性比对，零擦除零写入 ---- */
-    /* 1. 先读取 256 字节作为基准参考 */
-    if (W25QXX_Read(&g_flash, ref, FLASH_SAFE_TEST_SECTOR_ADDR, FLASH_TEST_LEN) == W25QXX_OK)
-    {
-        for (r = 0; r < FLASH_TEST_ROUNDS; r++)
-        {
-            memset(rx, 0, sizeof(rx));
-            if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, FLASH_TEST_LEN) != W25QXX_OK)
-            {
-                break;
-            }
-            /* 完整对比缓冲区数据一致性 */
-            if (memcmp(rx, ref, FLASH_TEST_LEN) != 0)
-            {
-                break;
-            }
-            rounds_ok++;
-
-            /* TFT 与 Flash 共用 SPI1，交替占用总线刷块（验证总线仲裁） */
-            LCD_Fill(&g_lcd, 16 + r * 72, 172, 16 + r * 72 + 56, 216, GREEN);
-        }
-    }
-#endif
 
     elapsed = GetTick_ms() - elapsed;
 
-    for (i = 0; i < FLASH_TEST_LEN; i++)
-    {
-        sum += rx[i];
-    }
+    const void *owner_after = spi_bus_owner(bus);
+    uint16_t depth_after = bus->depth;
+    uint8_t pass = (rounds_ok == DUAL_TEST_ROUNDS) &&
+                   (owner_after == NULL) &&
+                   (depth_after == 0U);
 
-    /* 3. 结果上屏 */
-#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
-    LCD_ShowString(&g_lcd, 12, 12, "TFT+FLASH WRITE TEST", CYAN, BLACK, 16, 0);
-#else
-    LCD_ShowString(&g_lcd, 12, 12, "TFT+FLASH SAFE MODE", GREEN, BLACK, 16, 0);
-#endif
+    g_app_dual_result.magic            = 0x4455414CU; /* 'DUAL' */
+    g_app_dual_result.rounds_ok        = rounds_ok;
+    g_app_dual_result.rounds_total     = DUAL_TEST_ROUNDS;
+    g_app_dual_result.id_ok_count      = id_ok_count;
+    g_app_dual_result.dma256_ok_count  = dma256_ok_count;
+    g_app_dual_result.dma480_ok_count  = dma480_ok_count;
+    g_app_dual_result.tft_update_count = tft_update_count;
+    g_app_dual_result.post_read_ok     = post_read_ok;
+    g_app_dual_result.owner_null       = (owner_after == NULL) ? 1U : 0U;
+    g_app_dual_result.depth_zero       = (depth_after == 0U) ? 1U : 0U;
+    g_app_dual_result.pass             = pass ? 1U : 0U;
+    g_app_dual_result.elapsed_ms       = elapsed;
 
-    snprintf(line, sizeof(line), "ID:%04X CAP:%luMB",
-             g_flash.id, (unsigned long)cap_mb);
-    LCD_ShowString(&g_lcd, 12, 40, line, WHITE, BLACK, 16, 0);
+    snprintf(line, sizeof(line), "ROUNDS:%u/%u", (unsigned)rounds_ok, (unsigned)DUAL_TEST_ROUNDS);
+    LCD_ShowString(&g_lcd, 68, 75, line, WHITE, BLACK, 16, 0);
 
-#if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
-    snprintf(line, sizeof(line), "MODE:DESTRUCT SEC:%05lX", (unsigned long)FLASH_SAFE_TEST_SECTOR_ADDR);
-    LCD_ShowString(&g_lcd, 12, 64, line, RED, BLACK, 16, 0);
-#else
-    LCD_ShowString(&g_lcd, 12, 64, "MODE:READ-ONLY (ERASE:0)", LGRAY, BLACK, 16, 0);
-#endif
+    snprintf(line, sizeof(line), "ID:%lu DMA:%lu", (unsigned long)id_ok_count, (unsigned long)dma480_ok_count);
+    LCD_ShowString(&g_lcd, 64, 98, line, WHITE, BLACK, 16, 0);
 
-    snprintf(line, sizeof(line), "%uB x%u  MATCH:%u/%u",
-             (unsigned)FLASH_TEST_LEN, (unsigned)FLASH_TEST_ROUNDS,
-             (unsigned)rounds_ok, (unsigned)FLASH_TEST_ROUNDS);
-    LCD_ShowString(&g_lcd, 12, 88, line, WHITE, BLACK, 16, 0);
+    snprintf(line, sizeof(line), "%s %lums", pass ? "DUAL PASS" : "DUAL FAIL", (unsigned long)elapsed);
+    LCD_ShowString(&g_lcd, 72, 180, line, pass ? GREEN : RED, BLACK, 16, 0);
 
-    snprintf(line, sizeof(line), "%s SUM:%04X %lums",
-             (rounds_ok == FLASH_TEST_ROUNDS) ? "PASS" : "FAIL",
-             (unsigned)sum, (unsigned long)elapsed);
-    LCD_ShowString(&g_lcd, 12, 112,
-                   line,
-                   (rounds_ok == FLASH_TEST_ROUNDS) ? GREEN : RED,
-                   BLACK, 16, 0);
-
-    snprintf(line, sizeof(line), "RX[0]=%02X RX[1]=%02X", rx[0], rx[1]);
-    LCD_ShowString(&g_lcd, 12, 136, line, YELLOW, BLACK, 16, 0);
-
-    LCD_DrawRectangle(&g_lcd, 2, 2, 237, 237, WHITE);
+    Delay_ms(800);
 }
 
 /**
