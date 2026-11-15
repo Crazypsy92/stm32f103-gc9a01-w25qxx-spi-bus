@@ -40,7 +40,14 @@ add_executable(test_spi_multi_instance test_spi_multi_instance.c mock.c
 target_compile_definitions(test_spi_multi_instance PRIVATE HOST_TEST=1)
 target_include_directories(test_spi_multi_instance PRIVATE ${STUB_DIR} ${BSP_INC})
 
+# ---- Real KEY1 BSP + multi_button with synthetic 1ms SysTick interrupts ----
+add_executable(test_key_timing test_key_timing.c mock.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../BSP/Src/key_port.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../BSP/Src/multi_button.c)
+target_include_directories(test_key_timing PRIVATE ${STUB_DIR} ${BSP_INC})
+
 enable_testing()
+add_test(NAME key_timing COMMAND test_key_timing)
 add_test(NAME bus                COMMAND test_bus)
 add_test(NAME ll                 COMMAND test_ll)
 add_test(NAME flash              COMMAND test_flash)
