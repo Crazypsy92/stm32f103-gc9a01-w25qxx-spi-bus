@@ -29,8 +29,13 @@ add_executable(test_gc9a01 test_gc9a01.c
 target_compile_definitions(test_gc9a01 PRIVATE HOST_TEST=1)
 target_include_directories(test_gc9a01 PRIVATE ${STUB_DIR} ${BSP_INC})
 
+# ---- SPI 多实例与设备配置注入测试 (Stage 2.2-A) ----
+add_executable(test_spi_multi_instance test_spi_multi_instance.c)
+target_include_directories(test_spi_multi_instance PRIVATE ${BSP_INC})
+
 enable_testing()
-add_test(NAME bus    COMMAND test_bus)
-add_test(NAME ll     COMMAND test_ll)
-add_test(NAME flash  COMMAND test_flash)
-add_test(NAME gc9a01 COMMAND test_gc9a01)
+add_test(NAME bus                COMMAND test_bus)
+add_test(NAME ll                 COMMAND test_ll)
+add_test(NAME flash              COMMAND test_flash)
+add_test(NAME gc9a01             COMMAND test_gc9a01)
+add_test(NAME spi_multi_instance COMMAND test_spi_multi_instance)

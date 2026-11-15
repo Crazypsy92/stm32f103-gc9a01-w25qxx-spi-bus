@@ -9,11 +9,44 @@
 
 #include "spi_bus.h"
 
+/** @brief 板级 SPI 总线标识 */
+typedef enum {
+    BSP_SPI_BUS_1 = 0,
+    BSP_SPI_BUS_2 = 1,
+    BSP_SPI_BUS_MAX
+} bsp_spi_id_t;
+
 /**
- * @brief 获取 SPI1 抽象总线（首次调用时自动完成 GPIO/外设初始化）
- * @note  GC9A01 与 W25QXX 共享该总线，各自在传输前切换速率/模式
+ * @brief 获取指定 ID 的 SPI 抽象总线（按需惰性初始化对应硬件）
+ * @param id BSP_SPI_BUS_1 或 BSP_SPI_BUS_2
+ * @return spi_bus_t* 成功；NULL 参数非法
+ */
+spi_bus_t *BSP_SPI_GetBus(bsp_spi_id_t id);
+
+/**
+ * @brief 获取 SPI1 抽象总线（兼容原 API，GC9A01 与 W25QXX 默认共用）
  */
 spi_bus_t *BSP_SPI1_GetBus(void);
+
+/**
+ * @brief 获取 SPI2 抽象总线（供多总线场景独立调用）
+ * @note  注意：在现有硬件连线上 PB13 被用作 TFT_DC，实机默认不调用 SPI2
+ */
+spi_bus_t *BSP_SPI2_GetBus(void);
+
+/**
+ * @brief  对指定总线执行硬件级异常恢复
+ * @param  bus 目标抽象总线指针
+ * @return 0 成功，负值失败
+ */
+int BSP_SPI_RecoverBus(spi_bus_t *bus);
+
+/**
+ * @brief  板级 SPI1 恢复入口（测试/故障用，兼容原 API）
+ * @return 0 成功，负值失败
+ * @note   调用 spi_stm32_ll_recover，不触碰任何 CS；供恢复测试使用。
+ */
+int BSP_SPI1_Recover(void);
 
 /* ====================================================================
  * 中断抢占探针（测试用，可整体删除，不影响总线功能）

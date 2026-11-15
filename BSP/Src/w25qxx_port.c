@@ -1,9 +1,9 @@
 /**
  * @file    w25qxx_port.c
- * @brief   W25QXX 移植层（STM32F1 + LL 库）
- * @details 唯一与 MCU 相关的文件：负责片选引脚初始化，并把共享 SPI1 总线
- *          以 W25QXX_Bus 回调表的形式交给驱动。
- *          SPI 外设本身由 bsp_spi.c 统一管理，与 GC9A01 共享。
+ * @brief   W25QXX 移植层实现（STM32F1 + LL 库，支持配置注入与多实例）
+ * @details 负责片选引脚控制、SPI 总线绑定与读写回调，填充 W25QXX_Bus 回调表。
+ *          支持通过 W25QXX_PortInitWithConfig 注入任意 SPI 总线与片选引脚；
+ *          W25QXX_PortInit 提供默认 SPI1 兼容封装。
  */
 #include "w25qxx_port.h"
 #include "bsp_spi.h"
@@ -12,57 +12,64 @@
 #include <string.h>
 
 /* ================================================================================== */
-/* 板级配置（按实际硬件修改）                                         */
+/* 默认板级硬件配置（SPI1 接线）                                                      */
 /* ================================================================================== */
 
-/* W25QXX 接线：CS=PA8  SCK=PA5  MISO=PA6  MOSI=PA7（SPI1 默认引脚） */
-#define W25QXX_CS_PORT      GPIOA
-#define W25QXX_CS_PIN       LL_GPIO_PIN_8
+#define W25QXX_DEFAULT_CS_PORT      GPIOA
+#define W25QXX_DEFAULT_CS_PIN       LL_GPIO_PIN_8
 
-/* 设备级总线参数：9MHz（72MHz/8），模式 0（W25Qxx 支持模式 0/3）
-   数据段交给批量回调，长度超过总线阈值（16B）时走 DMA1_Ch2/Ch3 */
-#define W25QXX_SPI_CLOCK_HZ 9000000U
-#define W25QXX_SPI_MODE     SPI_BUS_MODE_0
-#define W25QXX_SPI_USE_DMA  1
+#define W25QXX_DEFAULT_SPI_CLOCK_HZ 9000000U
+#define W25QXX_DEFAULT_SPI_MODE     SPI_BUS_MODE_0
+#define W25QXX_DEFAULT_SPI_USE_DMA  1
 
-/* 读方向需要同时发 0xFF 才能产生时钟，分块大小即该哑元缓冲长度 */
-#define W25QXX_BULK_CHUNK   64U
+#define W25QXX_BULK_CHUNK           64U
+#define W25QXX_MAX_INSTANCES        2U
 
 /* ================================================================================== */
-/* 内部变量                                                           */
+/* 内部上下文结构定义                                                                 */
 /* ================================================================================== */
 
-/** @brief 总线回调的上下文：共享总线 + 本设备参数 + 片选引脚 */
 typedef struct {
     spi_bus_t        *bus;
     spi_bus_config_t  cfg;
     GPIO_TypeDef     *cs_port;
     uint32_t          cs_pin;
-} W25QXX_PortCtx;
+    W25QXX_Bus        bus_ops;
+    uint8_t           s_ff[W25QXX_BULK_CHUNK];
+    uint8_t           in_use;
+} W25QXX_PortContext;
 
-static W25QXX_PortCtx s_ctx = {
-    .bus     = NULL,
-    .cfg     = { W25QXX_SPI_CLOCK_HZ, W25QXX_SPI_MODE, W25QXX_SPI_USE_DMA },
-    .cs_port = W25QXX_CS_PORT,
-    .cs_pin  = W25QXX_CS_PIN,
-};
+static W25QXX_PortContext s_flash_contexts[W25QXX_MAX_INSTANCES];
 
-/* 读方向哑元缓冲：SPI 是全双工，必须持续送 0xFF 才能产生时钟 */
-static uint8_t s_ff[W25QXX_BULK_CHUNK];
+/* 全局默认设备句柄 */
+W25QXX_Device g_flash;
 
 /* ================================================================================== */
-/* 总线回调实现（驱动通过这些函数访问硬件）                            */
+/* 内部辅助：GPIO 时钟使能                                                            */
+/* ================================================================================== */
+
+static void gpio_clock_enable(GPIO_TypeDef *port)
+{
+    if (port == GPIOA) {
+        LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_GPIOA);
+    } else if (port == GPIOB) {
+        LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_GPIOB);
+    } else if (port == GPIOC) {
+        LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_GPIOC);
+    }
+}
+
+/* ================================================================================== */
+/* W25QXX_Bus 回调实现（通过 ctx 上下文动态访问绑定的硬件与总线）                      */
 /* ================================================================================== */
 
 static int W25QXX_Port_CS_Low(void *ctx)
 {
-    W25QXX_PortCtx *p = (W25QXX_PortCtx *)ctx;
-
+    W25QXX_PortContext *p = (W25QXX_PortContext *)ctx;
     if (p == NULL || p->bus == NULL) {
         return -1;
     }
 
-    /* 占用总线并切到本设备参数；被其它设备占用或在 ISR 中时保持 CS 高并返回错误 */
     if (spi_bus_acquire(p->bus, p, &p->cfg) != 0) {
         return -1;
     }
@@ -72,13 +79,11 @@ static int W25QXX_Port_CS_Low(void *ctx)
 
 static int W25QXX_Port_CS_High(void *ctx)
 {
-    W25QXX_PortCtx *p = (W25QXX_PortCtx *)ctx;
-
+    W25QXX_PortContext *p = (W25QXX_PortContext *)ctx;
     if (p == NULL || p->bus == NULL) {
         return -1;
     }
 
-    /* 仅当本次 release 真正交还总线才拉高 CS；嵌套期间 CS 保持有效 */
     int rel = spi_bus_release(p->bus, p);
     if (rel > 0) {
         LL_GPIO_SetOutputPin(p->cs_port, p->cs_pin);
@@ -90,11 +95,10 @@ static int W25QXX_Port_CS_High(void *ctx)
 
 static int W25QXX_Port_Swap(void *ctx, uint8_t tx, uint8_t *rx)
 {
-    W25QXX_PortCtx *p = (W25QXX_PortCtx *)ctx;
+    W25QXX_PortContext *p = (W25QXX_PortContext *)ctx;
     uint8_t dummy = 0xFFU;
     uint8_t *rx_buf = (rx != NULL) ? rx : &dummy;
 
-    /* 只有本设备仍持有总线时才收发 */
     if (p == NULL || p->bus == NULL || spi_bus_owner(p->bus) != p) {
         return -1;
     }
@@ -110,10 +114,9 @@ static uint32_t W25QXX_Port_Millis(void *ctx)
     return GetTick_ms();
 }
 
-/* 读数据段：发送 0xFF 哑元同时接收，长度超过阈值时由总线切到 DMA */
 static int W25QXX_Port_ReadBulk(void *ctx, uint8_t *rx, uint32_t len)
 {
-    W25QXX_PortCtx *p = (W25QXX_PortCtx *)ctx;
+    W25QXX_PortContext *p = (W25QXX_PortContext *)ctx;
     uint32_t done = 0;
 
     if (rx == NULL || p == NULL || p->bus == NULL || spi_bus_owner(p->bus) != p) {
@@ -125,7 +128,7 @@ static int W25QXX_Port_ReadBulk(void *ctx, uint8_t *rx, uint32_t len)
         if (n > W25QXX_BULK_CHUNK) {
             n = W25QXX_BULK_CHUNK;
         }
-        if (spi_bus_transfer(p->bus, p, s_ff, rx + done, (uint16_t)n) != 0) {
+        if (spi_bus_transfer(p->bus, p, p->s_ff, rx + done, (uint16_t)n) != 0) {
             return -1;
         }
         done += n;
@@ -133,10 +136,9 @@ static int W25QXX_Port_ReadBulk(void *ctx, uint8_t *rx, uint32_t len)
     return 0;
 }
 
-/* 写数据段：只发不收 */
 static int W25QXX_Port_WriteBulk(void *ctx, const uint8_t *tx, uint32_t len)
 {
-    W25QXX_PortCtx *p = (W25QXX_PortCtx *)ctx;
+    W25QXX_PortContext *p = (W25QXX_PortContext *)ctx;
 
     if (tx == NULL || p == NULL || p->bus == NULL || spi_bus_owner(p->bus) != p) {
         return -1;
@@ -144,52 +146,82 @@ static int W25QXX_Port_WriteBulk(void *ctx, const uint8_t *tx, uint32_t len)
     return spi_bus_transfer(p->bus, p, tx, NULL, len);
 }
 
-/* 交给驱动的抽象总线（生命周期覆盖整个运行期） */
-static const W25QXX_Bus s_w25qxx_bus = {
-    .cs_low     = W25QXX_Port_CS_Low,
-    .cs_high    = W25QXX_Port_CS_High,
-    .swap       = W25QXX_Port_Swap,
-    .millis     = W25QXX_Port_Millis,
-    .ctx        = &s_ctx,
-    .read_bulk  = W25QXX_Port_ReadBulk,
-    .write_bulk = W25QXX_Port_WriteBulk
-};
-
 /* ================================================================================== */
-/* 片选引脚初始化                                                     */
+/* 硬件引脚初始化                                                                     */
 /* ================================================================================== */
 
-static void W25QXX_CS_Init(void)
+static void W25QXX_CS_Init(const W25QXX_PortContext *ctx)
 {
     LL_GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_GPIOA);
+    gpio_clock_enable(ctx->cs_port);
 
-    GPIO_InitStruct.Pin        = W25QXX_CS_PIN;
+    GPIO_InitStruct.Pin        = ctx->cs_pin;
     GPIO_InitStruct.Mode       = LL_GPIO_MODE_OUTPUT;
     GPIO_InitStruct.Speed      = LL_GPIO_SPEED_FREQ_HIGH;
     GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-    LL_GPIO_Init(W25QXX_CS_PORT, &GPIO_InitStruct);
+    LL_GPIO_Init(ctx->cs_port, &GPIO_InitStruct);
 
     /* 默认不选中 */
-    LL_GPIO_SetOutputPin(W25QXX_CS_PORT, W25QXX_CS_PIN);
+    LL_GPIO_SetOutputPin(ctx->cs_port, ctx->cs_pin);
 }
 
 /* ================================================================================== */
-/* 移植接口实现                                                       */
+/* 对外移植与配置注入接口实现                                                         */
 /* ================================================================================== */
 
-W25QXX_Device g_flash;
+W25QXX_Result W25QXX_PortInitWithConfig(W25QXX_Device *dev, const W25QXX_PortConfig *config)
+{
+    if (dev == NULL || config == NULL) {
+        return W25QXX_ERROR_PARAM;
+    }
+
+    /* 分配并持久化上下文槽位（slot 0 保留给默认 g_flash） */
+    uint32_t slot = 0;
+    if (dev != &g_flash) {
+        for (slot = 1; slot < W25QXX_MAX_INSTANCES; slot++) {
+            if (!s_flash_contexts[slot].in_use) break;
+        }
+        if (slot >= W25QXX_MAX_INSTANCES) {
+            slot = W25QXX_MAX_INSTANCES - 1U;
+        }
+    }
+
+    W25QXX_PortContext *ctx = &s_flash_contexts[slot];
+    ctx->in_use = 1U;
+
+    /* 绑定总线（若未指定则使用 SPI1）与参数配置 */
+    ctx->bus          = (config->bus != NULL) ? config->bus : BSP_SPI1_GetBus();
+    ctx->cfg.clock_hz = (config->spi_clock_hz > 0U) ? config->spi_clock_hz : W25QXX_DEFAULT_SPI_CLOCK_HZ;
+    ctx->cfg.mode     = config->spi_mode;
+    ctx->cfg.use_dma  = config->use_dma;
+    ctx->cs_port      = (config->cs_port != NULL) ? config->cs_port : W25QXX_DEFAULT_CS_PORT;
+    ctx->cs_pin       = (config->cs_pin != 0U) ? config->cs_pin : W25QXX_DEFAULT_CS_PIN;
+
+    memset(ctx->s_ff, 0xFF, sizeof(ctx->s_ff));
+
+    ctx->bus_ops.cs_low     = W25QXX_Port_CS_Low;
+    ctx->bus_ops.cs_high    = W25QXX_Port_CS_High;
+    ctx->bus_ops.swap       = W25QXX_Port_Swap;
+    ctx->bus_ops.millis     = W25QXX_Port_Millis;
+    ctx->bus_ops.ctx        = ctx;
+    ctx->bus_ops.read_bulk  = W25QXX_Port_ReadBulk;
+    ctx->bus_ops.write_bulk = W25QXX_Port_WriteBulk;
+
+    W25QXX_CS_Init(ctx);
+
+    return W25QXX_Init(dev, &ctx->bus_ops);
+}
 
 void W25QXX_PortInit(void)
 {
-    /* 1. 取得共享的 SPI1 总线（GC9A01 若已初始化则直接复用） */
-    s_ctx.bus = BSP_SPI1_GetBus();
-
-    /* 2. 片选引脚 + 读哑元缓冲 */
-    W25QXX_CS_Init();
-    memset(s_ff, 0xFF, sizeof(s_ff));
-
-    /* 3. 绑定总线并读 ID */
-    (void)W25QXX_Init(&g_flash, &s_w25qxx_bus);
+    static const W25QXX_PortConfig def_cfg = {
+        .bus          = NULL, /* 自动绑定 BSP_SPI1_GetBus() */
+        .spi_clock_hz = W25QXX_DEFAULT_SPI_CLOCK_HZ,
+        .spi_mode     = W25QXX_DEFAULT_SPI_MODE,
+        .use_dma      = W25QXX_DEFAULT_SPI_USE_DMA,
+        .cs_port      = W25QXX_DEFAULT_CS_PORT,
+        .cs_pin       = W25QXX_DEFAULT_CS_PIN,
+    };
+    (void)W25QXX_PortInitWithConfig(&g_flash, &def_cfg);
 }

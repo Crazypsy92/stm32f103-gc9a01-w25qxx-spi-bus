@@ -28,6 +28,25 @@
 #define BSP_SPI1_DMA_RX_CH  LL_DMA_CHANNEL_2
 
 /* ================================================================================== */
+/* SPI2 板级硬件配置（供多总线与 Host 模拟）                                           */
+/* ================================================================================== */
+
+#define BSP_SPI2_PERIPH     SPI2
+#define BSP_SPI2_PCLK_HZ    36000000U   /* APB1 = 36MHz */
+
+#define BSP_SPI2_SCK_PORT   GPIOB
+#define BSP_SPI2_SCK_PIN    LL_GPIO_PIN_13
+#define BSP_SPI2_MISO_PORT  GPIOB
+#define BSP_SPI2_MISO_PIN   LL_GPIO_PIN_14
+#define BSP_SPI2_MOSI_PORT  GPIOB
+#define BSP_SPI2_MOSI_PIN   LL_GPIO_PIN_15
+
+/* DMA1 固定映射：SPI2_TX → 通道5，SPI2_RX → 通道4 */
+#define BSP_SPI2_DMA        DMA1
+#define BSP_SPI2_DMA_TX_CH  LL_DMA_CHANNEL_5
+#define BSP_SPI2_DMA_RX_CH  LL_DMA_CHANNEL_4
+
+/* ================================================================================== */
 /* 内部变量                                                           */
 /* ================================================================================== */
 
@@ -45,20 +64,56 @@ static const spi_stm32_ll_hw_t s_spi1_hw = {
     .dma_rx_ch = BSP_SPI1_DMA_RX_CH,
 };
 
-static spi_stm32_ll_t s_spi1;
-static uint8_t s_spi1_inited = 0U;
+static const spi_stm32_ll_hw_t s_spi2_hw = {
+    .periph    = BSP_SPI2_PERIPH,
+    .pclk_hz   = BSP_SPI2_PCLK_HZ,
+    .sck_port  = BSP_SPI2_SCK_PORT,
+    .sck_pin   = BSP_SPI2_SCK_PIN,
+    .miso_port = BSP_SPI2_MISO_PORT,
+    .miso_pin  = BSP_SPI2_MISO_PIN,
+    .mosi_port = BSP_SPI2_MOSI_PORT,
+    .mosi_pin  = BSP_SPI2_MOSI_PIN,
+    .dma       = BSP_SPI2_DMA,
+    .dma_tx_ch = BSP_SPI2_DMA_TX_CH,
+    .dma_rx_ch = BSP_SPI2_DMA_RX_CH,
+};
+
+static spi_stm32_ll_t s_spi_instances[BSP_SPI_BUS_MAX];
+static uint8_t s_spi_inited[BSP_SPI_BUS_MAX] = {0U, 0U};
 
 /* ================================================================================== */
 /* 对外接口                                                           */
 /* ================================================================================== */
 
+spi_bus_t *BSP_SPI_GetBus(bsp_spi_id_t id)
+{
+    if ((uint32_t)id >= (uint32_t)BSP_SPI_BUS_MAX) {
+        return NULL;
+    }
+    if (!s_spi_inited[id]) {
+        const spi_stm32_ll_hw_t *hw = (id == BSP_SPI_BUS_1) ? &s_spi1_hw : &s_spi2_hw;
+        spi_stm32_ll_init(&s_spi_instances[id], hw);
+        s_spi_inited[id] = 1U;
+    }
+    return spi_stm32_ll_bus(&s_spi_instances[id]);
+}
+
 spi_bus_t *BSP_SPI1_GetBus(void)
 {
-    if (!s_spi1_inited) {
-        spi_stm32_ll_init(&s_spi1, &s_spi1_hw);
-        s_spi1_inited = 1U;
+    return BSP_SPI_GetBus(BSP_SPI_BUS_1);
+}
+
+spi_bus_t *BSP_SPI2_GetBus(void)
+{
+    return BSP_SPI_GetBus(BSP_SPI_BUS_2);
+}
+
+int BSP_SPI_RecoverBus(spi_bus_t *bus)
+{
+    if (bus == NULL || bus->ctx == NULL) {
+        return -1;
     }
-    return spi_stm32_ll_bus(&s_spi1);
+    return spi_stm32_ll_recover((spi_stm32_ll_t *)bus->ctx);
 }
 
 /* ================================================================================== */
@@ -166,5 +221,5 @@ void TIM2_IRQHandler(void)
 
 int BSP_SPI1_Recover(void)
 {
-    return spi_stm32_ll_recover(&s_spi1);
+    return BSP_SPI_RecoverBus(BSP_SPI1_GetBus());
 }

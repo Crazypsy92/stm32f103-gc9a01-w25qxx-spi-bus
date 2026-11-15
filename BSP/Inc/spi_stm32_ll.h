@@ -42,10 +42,12 @@ typedef struct {
 
 /** @brief STM32 SPI 总线实例 */
 typedef struct {
-    spi_bus_t            bus;        /* 对外的抽象总线 */
-    const spi_stm32_ll_hw_t *hw;     /* 硬件描述（生命周期需覆盖实例） */
-    spi_bus_config_t     current;    /* 当前已生效参数（用于避免重复配置） */
-    uint8_t              configured; /* 是否已完成首次配置 */
+    spi_bus_t            bus;           /* 对外的抽象总线 */
+    const spi_stm32_ll_hw_t *hw;        /* 硬件描述（生命周期需覆盖实例） */
+    spi_bus_config_t     current;       /* 当前已生效参数（用于避免重复配置） */
+    uint8_t              configured;    /* 是否已完成首次配置 */
+    uint32_t             recover_count; /* 本实例异常恢复次数（与全局统计隔离） */
+    int32_t              last_error;    /* 本实例最后一次错误码（与全局统计隔离） */
 } spi_stm32_ll_t;
 
 /**
@@ -63,5 +65,14 @@ spi_bus_t *spi_stm32_ll_bus(spi_stm32_ll_t *ll);
  * @note   不操作任何 CS 引脚；供异常恢复测试或故障后手动恢复调用。
  */
 int spi_stm32_ll_recover(spi_stm32_ll_t *ll);
+
+/** @brief 查询实例恢复调用次数 */
+uint32_t spi_stm32_ll_get_recover_count(const spi_stm32_ll_t *ll);
+
+/** @brief 查询实例最后一次错误码 */
+int32_t spi_stm32_ll_get_last_error(const spi_stm32_ll_t *ll);
+
+/** @brief 清除实例错误状态 */
+void spi_stm32_ll_clear_error(spi_stm32_ll_t *ll);
 
 #endif /* __SPI_STM32_LL_H__ */

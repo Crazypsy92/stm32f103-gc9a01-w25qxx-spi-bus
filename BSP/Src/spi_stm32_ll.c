@@ -267,6 +267,7 @@ static spi_ll_status_t spi_recover(spi_stm32_ll_t *ll)
     DMA_TypeDef *dma = ll->hw->dma;
     uint32_t start;
 
+    ll->recover_count++;
     g_ll_recover_count++;
 
     /* 1. 关 SPI 的 DMA 请求 */
@@ -475,6 +476,7 @@ static int ll_transfer(spi_bus_t *bus, const uint8_t *tx, uint8_t *rx, uint32_t 
     } else {
         ret = (int)ll_transfer_poll(ll, tx, rx, len);
     }
+    ll->last_error = ret;
     if (ret != (int)SPI_LL_OK) {
         g_ll_last_error = ret;
     }
@@ -513,6 +515,8 @@ void spi_stm32_ll_init(spi_stm32_ll_t *ll, const spi_stm32_ll_hw_t *hw)
     ll->bus.depth = 0U;
     ll->bus.rejects = 0U;
     ll->configured = 0U;
+    ll->recover_count = 0U;
+    ll->last_error = 0;
     memset(&ll->current, 0, sizeof(ll->current));
 
     spi = hw->periph;
@@ -564,4 +568,21 @@ int spi_stm32_ll_recover(spi_stm32_ll_t *ll)
         return (int)SPI_LL_ERROR_PARAM;
     }
     return (int)spi_recover(ll);
+}
+
+uint32_t spi_stm32_ll_get_recover_count(const spi_stm32_ll_t *ll)
+{
+    return (ll == NULL) ? 0U : ll->recover_count;
+}
+
+int32_t spi_stm32_ll_get_last_error(const spi_stm32_ll_t *ll)
+{
+    return (ll == NULL) ? 0 : ll->last_error;
+}
+
+void spi_stm32_ll_clear_error(spi_stm32_ll_t *ll)
+{
+    if (ll != NULL) {
+        ll->last_error = 0;
+    }
 }
