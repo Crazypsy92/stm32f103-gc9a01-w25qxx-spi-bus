@@ -3,6 +3,7 @@
  * @brief   W25Qxx SPI NOR Flash 协议实现（与 MCU 无关）
  * @details 仅通过 W25QXX_Bus 回调访问总线/片选，不直接操作任何寄存器。
  *          写/擦除返回 W25QXX_Result，忙等待带超时（需 port 提供 millis 回调）。
+ *          Stage 1.2-B: 严格检查片选释放 (W25_CS_HIGH) 返回值，确保释放失败不误报成功。
  */
 #include "w25qxx.h"
 #include "delay.h"
@@ -128,7 +129,10 @@ W25QXX_Result W25QXX_ReadStatusReg(W25QXX_Device *dev, uint8_t *status)
         return W25_Return(dev, W25QXX_ERROR_BUS);
     }
 
-    (void)W25_CS_HIGH(dev);
+    if (W25_CS_HIGH(dev) != 0) {
+        return W25_Return(dev, W25QXX_ERROR_BUS);
+    }
+
     *status = st;
     return W25QXX_OK;
 }
@@ -193,7 +197,9 @@ W25QXX_Result W25QXX_WriteEnable(W25QXX_Device *dev)
             (void)W25_CS_HIGH(dev);
             return W25_Return(dev, W25QXX_ERROR_BUS);
         }
-        (void)W25_CS_HIGH(dev);
+        if (W25_CS_HIGH(dev) != 0) {
+            return W25_Return(dev, W25QXX_ERROR_BUS);
+        }
 
         /* 验证 WEL 是否已锁存 (bit 1) */
         W25QXX_Result res = W25QXX_ReadStatusReg(dev, &st);
@@ -266,7 +272,9 @@ uint16_t W25QXX_ReadID(W25QXX_Device *dev)
         return 0;
     }
 
-    (void)W25_CS_HIGH(dev);
+    if (W25_CS_HIGH(dev) != 0) {
+        return 0;
+    }
     return ((uint16_t)id_hi << 8) | id_lo;
 }
 
@@ -327,7 +335,10 @@ W25QXX_Result W25QXX_Read(W25QXX_Device *dev, uint8_t *pBuffer, uint32_t ReadAdd
             }
         }
     }
-    (void)W25_CS_HIGH(dev);
+
+    if (W25_CS_HIGH(dev) != 0) {
+        return W25_Return(dev, W25QXX_ERROR_BUS);
+    }
 
     return W25_Return(dev, W25QXX_OK);
 }
@@ -391,7 +402,11 @@ static W25QXX_Result W25QXX_Write_Page(W25QXX_Device *dev, const uint8_t *pBuffe
         }
     }
 
-    (void)W25_CS_HIGH(dev);
+    /* 正常传输完毕，严格检查片选释放 */
+    if (W25_CS_HIGH(dev) != 0) {
+        return W25_Return(dev, W25QXX_ERROR_BUS);
+    }
+
     /* 等待页编程周期（tPP 典型 0.7ms，最大 3ms），避免过早拉低 CS 破坏编程 */
     Delay_ms(3);
 
@@ -473,7 +488,10 @@ W25QXX_Result W25QXX_EraseSector(W25QXX_Device *dev, uint32_t SectorAddr)
         (void)W25_CS_HIGH(dev);
         return W25_Return(dev, W25QXX_ERROR_BUS);
     }
-    (void)W25_CS_HIGH(dev);
+
+    if (W25_CS_HIGH(dev) != 0) {
+        return W25_Return(dev, W25QXX_ERROR_BUS);
+    }
 
     /* 等待扇区擦除主要周期（典型 45ms，最大 400ms），避免过早轮询 */
     Delay_ms(40);
@@ -513,7 +531,10 @@ W25QXX_Result W25QXX_EraseChip(W25QXX_Device *dev)
         (void)W25_CS_HIGH(dev);
         return W25_Return(dev, W25QXX_ERROR_BUS);
     }
-    (void)W25_CS_HIGH(dev);
+
+    if (W25_CS_HIGH(dev) != 0) {
+        return W25_Return(dev, W25QXX_ERROR_BUS);
+    }
 
     W25QXX_Result result = W25QXX_WaitBusy(dev, W25QXX_CHIP_ERASE_TIMEOUT_MS);
     if (result == W25QXX_OK) {
@@ -562,7 +583,9 @@ W25QXX_Result W25QXX_PowerDown(W25QXX_Device *dev)
         (void)W25_CS_HIGH(dev);
         return W25_Return(dev, W25QXX_ERROR_BUS);
     }
-    (void)W25_CS_HIGH(dev);
+    if (W25_CS_HIGH(dev) != 0) {
+        return W25_Return(dev, W25QXX_ERROR_BUS);
+    }
     Delay_ms(1);
     return W25_Return(dev, W25QXX_OK);
 }
@@ -580,7 +603,9 @@ W25QXX_Result W25QXX_WakeUp(W25QXX_Device *dev)
         (void)W25_CS_HIGH(dev);
         return W25_Return(dev, W25QXX_ERROR_BUS);
     }
-    (void)W25_CS_HIGH(dev);
+    if (W25_CS_HIGH(dev) != 0) {
+        return W25_Return(dev, W25QXX_ERROR_BUS);
+    }
     Delay_ms(1);
     return W25_Return(dev, W25QXX_OK);
 }

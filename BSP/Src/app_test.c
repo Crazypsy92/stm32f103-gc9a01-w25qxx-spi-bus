@@ -2,7 +2,7 @@
  * @file app_test.c
  * @brief 应用层显示与总线测试实现
  * @details GC9A01 上电自测、W25QXX 读写校验、总线接口契约检查与抢占压力测试。
- *          Stage 1.2: 引入安全测试模式开关，默认上电严禁执行任何物理 Flash 擦除或写入。
+ *          Stage 1.2-B: 增强非破坏性读取数据完整性校验，区分通信成功与数据一致性统计。
  */
 
 #include "app_test.h"
@@ -42,6 +42,12 @@ typedef struct {
     uint32_t rounds_fail_stage;
     uint32_t rounds_fail_tx0;
     uint32_t rounds_fail_rx0;
+    /* Stage 1.2-B: 数据一致性校验扩展统计 */
+    uint32_t read_ok;               /* 读取接口成功次数 */
+    uint32_t data_match_ok;        /* 数据重复读取一致次数 */
+    uint32_t data_mismatch;        /* 数据不一致次数 */
+    uint32_t first_mismatch_offset;/* 首个不一致字节偏移 */
+    int32_t  last_flash_error;     /* 最后一次 Flash 错误码 */
 } app_test_result_t;
 
 volatile app_test_result_t g_app_test_result;
@@ -103,7 +109,7 @@ void AppTFT_Task(void)
 
 /**
  * @brief 双设备共享总线测试：TFT 与 W25QXX 交替占用 SPI1
- * @note  默认安全模式：仅执行非破坏性只读测试，绝对不擦除/改写 Flash 数据！
+ * @note  默认安全模式：仅执行非破坏性只读测试，完整核对重复读取数据一致性，绝对不擦除/改写 Flash 数据！
  */
 void AppFlash_Test(void)
 {
@@ -114,6 +120,7 @@ void AppFlash_Test(void)
     static uint8_t tx[FLASH_TEST_LEN];
 #endif
     static uint8_t rx[FLASH_TEST_LEN];
+    static uint8_t ref[FLASH_TEST_LEN];
     char line[40];
     uint32_t cap_mb = g_flash.capacity / (1024U * 1024U);
     uint32_t elapsed;
@@ -128,7 +135,6 @@ void AppFlash_Test(void)
 
 #if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
     /* ---- 破坏性测试模式（显式启用）：在经确认的安全扇区进行 3 轮写-读-校验 ---- */
-    /* 严格禁止默认使用 0x000000，且必须检查扇区地址小于容量 */
     if (FLASH_SAFE_TEST_SECTOR_ADDR != 0U &&
         FLASH_SAFE_TEST_SECTOR_ADDR < g_flash.capacity &&
         (FLASH_SAFE_TEST_SECTOR_ADDR % W25QXX_SECTOR_SIZE) == 0U)
@@ -156,19 +162,27 @@ void AppFlash_Test(void)
         }
     }
 #else
-    /* ---- 默认安全模式：仅执行非破坏性只读验证，零擦除零写入 ---- */
-    for (r = 0; r < FLASH_TEST_ROUNDS; r++)
+    /* ---- 默认安全模式：基准读取 + 重复读取数据一致性比对，零擦除零写入 ---- */
+    /* 1. 先读取 256 字节作为基准参考 */
+    if (W25QXX_Read(&g_flash, ref, FLASH_SAFE_TEST_SECTOR_ADDR, FLASH_TEST_LEN) == W25QXX_OK)
     {
-        memset(rx, 0, sizeof(rx));
-        /* 采用非破坏性读操作读取 Flash 数据段（走 DMA） */
-        if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, FLASH_TEST_LEN) != W25QXX_OK)
+        for (r = 0; r < FLASH_TEST_ROUNDS; r++)
         {
-            break;
-        }
-        rounds_ok++;
+            memset(rx, 0, sizeof(rx));
+            if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, FLASH_TEST_LEN) != W25QXX_OK)
+            {
+                break;
+            }
+            /* 完整对比缓冲区数据一致性 */
+            if (memcmp(rx, ref, FLASH_TEST_LEN) != 0)
+            {
+                break;
+            }
+            rounds_ok++;
 
-        /* TFT 与 Flash 共用 SPI1，交替占用总线刷块（验证总线仲裁） */
-        LCD_Fill(&g_lcd, 16 + r * 72, 172, 16 + r * 72 + 56, 216, GREEN);
+            /* TFT 与 Flash 共用 SPI1，交替占用总线刷块（验证总线仲裁） */
+            LCD_Fill(&g_lcd, 16 + r * 72, 172, 16 + r * 72 + 56, 216, GREEN);
+        }
     }
 #endif
 
@@ -197,7 +211,7 @@ void AppFlash_Test(void)
     LCD_ShowString(&g_lcd, 12, 64, "MODE:READ-ONLY (ERASE:0)", LGRAY, BLACK, 16, 0);
 #endif
 
-    snprintf(line, sizeof(line), "%uB x%u  R:%u/%u",
+    snprintf(line, sizeof(line), "%uB x%u  MATCH:%u/%u",
              (unsigned)FLASH_TEST_LEN, (unsigned)FLASH_TEST_ROUNDS,
              (unsigned)rounds_ok, (unsigned)FLASH_TEST_ROUNDS);
     LCD_ShowString(&g_lcd, 12, 88, line, WHITE, BLACK, 16, 0);
@@ -218,7 +232,7 @@ void AppFlash_Test(void)
 
 /**
  * @brief 总线并发与可靠性测试：契约检查 + 高优先级中断抢占压力测试
- * @note  Stage 1.2: 默认安全模式下不执行物理擦除与写入，全量契约与抢占保护仍然有效
+ * @note  Stage 1.2-B: 增强数据校验，独立统计通信成功与数据一致性指标
  */
 void AppBusTest(void)
 {
@@ -230,6 +244,8 @@ void AppBusTest(void)
 
     static uint8_t tx[BUS_TEST_BUF];
     static uint8_t rx[BUS_TEST_BUF];
+    static uint8_t ref_256[BUS_TEST_LEN];
+    static uint8_t ref_buf[BUS_TEST_BUF];
     static uint8_t tag_a, tag_b;
     static const spi_bus_config_t cfg_a = { 18000000U, SPI_BUS_MODE_0, 1 };
     static const spi_bus_config_t cfg_b = {  9000000U, SPI_BUS_MODE_0, 1 };
@@ -257,7 +273,18 @@ void AppBusTest(void)
     uint8_t rec_ok = 0;
     uint32_t erase_count = 0;
 
+    /* Stage 1.2-B 扩展统计变量 */
+    uint32_t read_ok = 0;
+    uint32_t data_match_ok = 0;
+    uint32_t data_mismatch = 0;
+    uint32_t first_mismatch_offset = 0xFFFFFFFFU;
+    int32_t  last_flash_error = 0;
+
     LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, BLACK);
+
+    /* ---------------- 0. 预读取基准数据（用于安全模式下的无损重复校验） ---------------- */
+    (void)W25QXX_Read(&g_flash, ref_256, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN);
+    (void)W25QXX_Read(&g_flash, ref_buf, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_BUF);
 
     /* ---------------- 1. 契约检查（纯状态机断言，与物理 Flash 擦写无关） ---------------- */
     BSP_SPI1_PreemptProbe_Init();
@@ -395,9 +422,13 @@ void AppBusTest(void)
             break;
         }
 #else
-        /* 安全模式：纯非破坏性读取，在 20kHz 中断压力下验证总线仲裁 */
+        /* 安全模式：纯非破坏性读取，并与基准数据逐字节比对，在 20kHz 中断压力下验证总线仲裁与数据稳定性 */
         if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN) != W25QXX_OK) {
             g_app_test_result.rounds_fail_stage = 2;
+            break;
+        }
+        if (memcmp(rx, ref_256, BUS_TEST_LEN) != 0) {
+            g_app_test_result.rounds_fail_stage = 3;
             break;
         }
 #endif
@@ -407,7 +438,7 @@ void AppBusTest(void)
     BSP_SPI1_PreemptProbe_Stop();
     BSP_SPI1_PreemptProbe_Get(&probe);
 
-    /* ---------------- 3. 传输长度矩阵（1~480 B，覆盖轮询与 DMA 切换） ---------------- */
+    /* ---------------- 3. 传输长度矩阵（1~480 B，覆盖轮询与 DMA 切换，完整核对数据） ---------------- */
     {
 #if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
         for (i = 0; i < BUS_TEST_BUF; i++) {
@@ -425,24 +456,39 @@ void AppBusTest(void)
             }
         }
 #else
-        /* 安全模式：对各长度执行纯读取测试，验证轮询与 DMA 切换无故障 */
+        /* 安全模式：按长度矩阵读取，并与 480B 基准的前缀数据比对完整缓冲区 */
         for (uint8_t li = 0; li < len_count; li++) {
             uint16_t L = len_list[li];
             memset(rx, 0, L);
-            if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, L) == W25QXX_OK) {
+            if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, L) == W25QXX_OK &&
+                memcmp(rx, ref_buf, L) == 0) {
                 len_ok++;
             }
         }
 #endif
     }
 
-    /* ---------------- 4. 1000 次 SPI 事务压力（纯读操作，零擦除） ---------------- */
+    /* ---------------- 4. 1000 次 SPI 事务压力（独立统计通信成功与数据一致性） ---------------- */
     {
         uint16_t k;
+        uint8_t ref_byte = ref_buf[0];
+
         for (k = 0; k < STRESS_TXN; k++) {
             uint8_t b = 0U;
-            if (W25QXX_Read(&g_flash, &b, FLASH_SAFE_TEST_SECTOR_ADDR, 1U) == W25QXX_OK) {
-                str_ok++;
+            W25QXX_Result res = W25QXX_Read(&g_flash, &b, FLASH_SAFE_TEST_SECTOR_ADDR, 1U);
+            if (res == W25QXX_OK) {
+                read_ok++;
+                if (b == ref_byte) {
+                    data_match_ok++;
+                    str_ok++;
+                } else {
+                    data_mismatch++;
+                    if (first_mismatch_offset == 0xFFFFFFFFU) {
+                        first_mismatch_offset = 0;
+                    }
+                }
+            } else {
+                last_flash_error = (int32_t)res;
             }
         }
     }
@@ -477,7 +523,8 @@ void AppBusTest(void)
     {
         if (BSP_SPI1_Recover() == 0) {
             memset(rx, 0, BUS_TEST_LEN);
-            if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN) == W25QXX_OK) {
+            if (W25QXX_Read(&g_flash, rx, FLASH_SAFE_TEST_SECTOR_ADDR, BUS_TEST_LEN) == W25QXX_OK &&
+                memcmp(rx, ref_256, BUS_TEST_LEN) == 0) {
                 rec_ok = 1;
             }
         }
@@ -492,13 +539,19 @@ void AppBusTest(void)
     owner_after = spi_bus_owner(bus);
     depth_after = bus->depth;
 
+    /* 校验已知设备 ID: W25Q128 (0xEF17) */
+    uint8_t id_match = (g_flash.id == W25Q128 && g_flash.capacity == 16U * 1024U * 1024U) ? 1U : 0U;
+
 #if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
     pass = (ct_pass == ct_total) &&
            (rounds_ok == BUS_TEST_ROUNDS) &&
            (len_ok == len_count) &&
            (str_ok == STRESS_TXN) &&
+           (data_match_ok == STRESS_TXN) &&
+           (data_mismatch == 0U) &&
            (fl_ok == FLASH_ROUNDS) &&
            (rec_ok == 1U) &&
+           (id_match == 1U) &&
            (probe.granted == 0U) &&
            (owner_after == NULL) &&
            (depth_after == 0U);
@@ -507,7 +560,10 @@ void AppBusTest(void)
            (rounds_ok == BUS_TEST_ROUNDS) &&
            (len_ok == len_count) &&
            (str_ok == STRESS_TXN) &&
+           (data_match_ok == STRESS_TXN) &&
+           (data_mismatch == 0U) &&
            (rec_ok == 1U) &&
+           (id_match == 1U) &&
            (probe.granted == 0U) &&
            (owner_after == NULL) &&
            (depth_after == 0U) &&
@@ -515,28 +571,34 @@ void AppBusTest(void)
 #endif
 
     /* ---------------- 7. 导出结构体与上屏 ---------------- */
-    g_app_test_result.magic            = 0x54534554U;   /* 'TEST' */
-    g_app_test_result.ct_pass          = ct_pass;
-    g_app_test_result.ct_total         = ct_total;
-    g_app_test_result.ct_fail          = s_ct_fail;
-    g_app_test_result.rounds_ok        = rounds_ok;
-    g_app_test_result.rounds_total     = BUS_TEST_ROUNDS;
-    g_app_test_result.len_ok           = len_ok;
-    g_app_test_result.len_count        = len_count;
-    g_app_test_result.str_ok           = str_ok;
-    g_app_test_result.str_total        = STRESS_TXN;
-    g_app_test_result.fl_ok            = fl_ok;
-    g_app_test_result.fl_total         = (CONFIG_FLASH_DESTRUCTIVE_TEST != 0) ? FLASH_ROUNDS : 0U;
-    g_app_test_result.erase_count      = erase_count;
-    g_app_test_result.rec_ok           = rec_ok;
-    g_app_test_result.ll_recover_count = g_ll_recover_count;
-    g_app_test_result.ll_last_error    = g_ll_last_error;
-    g_app_test_result.owner_null       = (owner_after == NULL) ? 1U : 0U;
-    g_app_test_result.depth_zero       = (depth_after == 0U) ? 1U : 0U;
-    g_app_test_result.pass             = pass ? 1U : 0U;
-    g_app_test_result.elapsed_ms       = elapsed;
-    g_app_test_result.test_mode        = CONFIG_FLASH_DESTRUCTIVE_TEST;
-    g_app_test_result.test_sector_addr = FLASH_SAFE_TEST_SECTOR_ADDR;
+    g_app_test_result.magic                 = 0x54534554U;   /* 'TEST' */
+    g_app_test_result.ct_pass               = ct_pass;
+    g_app_test_result.ct_total              = ct_total;
+    g_app_test_result.ct_fail               = s_ct_fail;
+    g_app_test_result.rounds_ok             = rounds_ok;
+    g_app_test_result.rounds_total          = BUS_TEST_ROUNDS;
+    g_app_test_result.len_ok                = len_ok;
+    g_app_test_result.len_count             = len_count;
+    g_app_test_result.str_ok                = str_ok;
+    g_app_test_result.str_total             = STRESS_TXN;
+    g_app_test_result.fl_ok                 = fl_ok;
+    g_app_test_result.fl_total              = (CONFIG_FLASH_DESTRUCTIVE_TEST != 0) ? FLASH_ROUNDS : 0U;
+    g_app_test_result.erase_count           = erase_count;
+    g_app_test_result.rec_ok                = rec_ok;
+    g_app_test_result.ll_recover_count      = g_ll_recover_count;
+    g_app_test_result.ll_last_error         = g_ll_last_error;
+    g_app_test_result.owner_null            = (owner_after == NULL) ? 1U : 0U;
+    g_app_test_result.depth_zero            = (depth_after == 0U) ? 1U : 0U;
+    g_app_test_result.pass                  = pass ? 1U : 0U;
+    g_app_test_result.elapsed_ms            = elapsed;
+    g_app_test_result.test_mode             = CONFIG_FLASH_DESTRUCTIVE_TEST;
+    g_app_test_result.test_sector_addr      = FLASH_SAFE_TEST_SECTOR_ADDR;
+    /* Stage 1.2-B 扩展字段 */
+    g_app_test_result.read_ok               = read_ok;
+    g_app_test_result.data_match_ok         = data_match_ok;
+    g_app_test_result.data_mismatch         = data_mismatch;
+    g_app_test_result.first_mismatch_offset = first_mismatch_offset;
+    g_app_test_result.last_flash_error      = last_flash_error;
 
     LCD_ShowString(&g_lcd, 12, 12, "BUS RELIABILITY TEST", CYAN, BLACK, 16, 0);
 
@@ -549,9 +611,9 @@ void AppBusTest(void)
              (unsigned long)probe.probes, (unsigned long)probe.saw_busy);
     LCD_ShowString(&g_lcd, 12, 56, line, WHITE, BLACK, 16, 0);
 
-    snprintf(line, sizeof(line), "LEN:%u/%u  STR:%u/%u",
+    snprintf(line, sizeof(line), "LEN:%u/%u STR:%lu/%lu",
              (unsigned)len_ok, (unsigned)len_count,
-             (unsigned)str_ok, (unsigned)STRESS_TXN);
+             (unsigned long)data_match_ok, (unsigned long)STRESS_TXN);
     LCD_ShowString(&g_lcd, 12, 80, line, WHITE, BLACK, 16, 0);
 
 #if (CONFIG_FLASH_DESTRUCTIVE_TEST != 0)
@@ -562,8 +624,9 @@ void AppBusTest(void)
 #endif
     LCD_ShowString(&g_lcd, 12, 104, line, WHITE, BLACK, 16, 0);
 
-    snprintf(line, sizeof(line), "REC:%s", rec_ok ? "OK" : "FAIL");
-    LCD_ShowString(&g_lcd, 12, 128, line, rec_ok ? GREEN : RED, BLACK, 16, 0);
+    snprintf(line, sizeof(line), "REC:%s ID:%s",
+             rec_ok ? "OK" : "FAIL", id_match ? "OK" : "FAIL");
+    LCD_ShowString(&g_lcd, 12, 128, line, (rec_ok && id_match) ? GREEN : RED, BLACK, 16, 0);
 
     snprintf(line, sizeof(line), "OWNER:%s DEPTH:%u",
              (owner_after == NULL) ? "NULL" : "LEFT", (unsigned)depth_after);

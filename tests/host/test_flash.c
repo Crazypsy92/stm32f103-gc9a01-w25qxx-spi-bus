@@ -1,12 +1,14 @@
 /**
  * @file  test_flash.c
- * @brief Host 离线单元测试：W25Q128 Flash 数据可靠性与安全保护整改 (Stage 1.2)
+ * @brief Host 离线单元测试：W25Q128 Flash 数据可靠性与安全保护整改 (Stage 1.2 & 1.2-B)
  * @details 覆盖：
  *          - F01: 地址边界与参数合法性检查（首末边界、跨页跨扇区、24位回绕、未对齐擦除、capacity=0）
  *          - F02: 写使能 (WEL) 状态校验与重试机制（WEL 失败严禁破坏性操作）
  *          - F03: SPI 单字节交换失败与 CS 失败错误向上传播
  *          - F04: WaitBusy 状态机错误与超时检测（禁止通信错误误判为完成）
  *          - F06: 读写跨页、跨扇区数据一致性与端到端闭环验证
+ *          - Stage 1.2-B Task 2: 片选释放 (W25_CS_HIGH) 失败全链路故障注入测试 (T01 ~ T08)
+ *          - Stage 1.2-B Task 3: 非破坏性重复读取数据校验与数据不一致检测注入
  */
 
 #include "w25qxx.h"
@@ -63,11 +65,11 @@ typedef struct {
     uint8_t current_cmd;
     uint32_t current_addr;
     uint16_t id;
-    int cs_asserted;
+    int cs_asserted;           /* 模拟硬件 CS 引脚状态：1=拉低选中，0=拉高释放 */
 
     /* 故障注入开关 */
     int inject_cs_low_fail;
-    int inject_cs_high_fail;
+    int inject_cs_high_fail;       /* CS 释放失败注入（模拟硬件引脚或总线释放被拒） */
     int inject_swap_fail;
     int inject_wel_fail;           /* WREN 后 WEL 保持为 0 */
     int inject_busy_timeout;       /* BUSY 保持为 1 */
@@ -112,6 +114,7 @@ static int mock_bus_cs_high(void *ctx)
 {
     mock_flash_ctx_t *m = (mock_flash_ctx_t *)ctx;
     if (m->inject_cs_high_fail) {
+        /* 模拟物理 CS 释放失败，引脚维持低电平（未释放），总线被占用 */
         return -1;
     }
     m->cs_asserted = 0;
@@ -337,11 +340,11 @@ static void test_address_boundary_protection(void)
     TEST_ASSERT(W25QXX_Read(&dev, buf, dev.capacity - 10, 11) == W25QXX_ERROR_PARAM, "Read rejected when addr+len > capacity");
     TEST_ASSERT(W25QXX_Write(&dev, buf, dev.capacity - 10, 11) == W25QXX_ERROR_PARAM, "Write rejected when addr+len > capacity");
 
-    /* 24 位地址回绕溢出检查 (例如 addr = 0xFFFFFF, len = 256) */
+    /* 24 位地址回绕溢出检查 */
     TEST_ASSERT(W25QXX_Read(&dev, buf, 0x00FFFFFFU, 256) == W25QXX_ERROR_PARAM, "Read rejected on 24-bit boundary overflow");
     TEST_ASSERT(W25QXX_Write(&dev, buf, 0x00FFFFFFU, 256) == W25QXX_ERROR_PARAM, "Write rejected on 24-bit boundary overflow");
 
-    /* 32 位整数相加回绕检查 (addr = 0xFFFFFFFF) */
+    /* 32 位整数相加回绕检查 */
     TEST_ASSERT(W25QXX_Read(&dev, buf, 0xFFFFFFFFU, 10) == W25QXX_ERROR_PARAM, "Read rejected on 32-bit uint wrap-around");
     TEST_ASSERT(W25QXX_Write(&dev, buf, 0xFFFFFFFFU, 10) == W25QXX_ERROR_PARAM, "Write rejected on 32-bit uint wrap-around");
 
@@ -364,30 +367,25 @@ static void test_write_enable_failure_interception(void)
     uint8_t data[256];
     memset(data, 0x5A, sizeof(data));
 
-    /* 注入 WEL 硬件锁存故障：WREN 指令无法使 WEL 位置位 */
+    /* 注入 WEL 硬件锁存故障 */
     s_mock_ctx.inject_wel_fail = 1;
     s_mock_ctx.erase_sector_count = 0;
     s_mock_ctx.page_program_count = 0;
 
-    /* 验证 WriteEnable 单独调用返回 W25QXX_ERROR_WEL */
     W25QXX_Result wel_res = W25QXX_WriteEnable(&dev);
     TEST_ASSERT(wel_res == W25QXX_ERROR_WEL, "W25QXX_WriteEnable returns ERROR_WEL when hardware latch fails");
 
-    /* 验证 Page Program 严格拒绝执行，且底层未发送擦除或编程命令 */
     W25QXX_Result wr_res = W25QXX_Write_NoCheck(&dev, data, 0x1000, 256);
     TEST_ASSERT(wr_res == W25QXX_ERROR_WEL, "Write_NoCheck aborted immediately on WEL failure");
     TEST_ASSERT(s_mock_ctx.page_program_count == 0, "No Page Program command sent to flash on WEL failure");
 
-    /* 验证 Sector Erase 严格拒绝执行 */
     W25QXX_Result er_res = W25QXX_EraseSector(&dev, 0x1000);
     TEST_ASSERT(er_res == W25QXX_ERROR_WEL, "EraseSector aborted immediately on WEL failure");
     TEST_ASSERT(s_mock_ctx.erase_sector_count == 0, "No Sector Erase command sent to flash on WEL failure");
 
-    /* 验证 Chip Erase 严格拒绝执行 */
     W25QXX_Result ec_res = W25QXX_EraseChip(&dev);
     TEST_ASSERT(ec_res == W25QXX_ERROR_WEL, "EraseChip aborted immediately on WEL failure");
 
-    /* 恢复正常 WEL */
     s_mock_ctx.inject_wel_fail = 0;
     TEST_ASSERT(W25QXX_WriteEnable(&dev) == W25QXX_OK, "WriteEnable succeeds after hardware recovers");
 }
@@ -401,7 +399,7 @@ static void test_spi_error_propagation(void)
     W25QXX_Init(&dev, &s_mock_bus);
     uint8_t buf[256];
 
-    /* CS 申请失败（例如被高优先级中断抢占或总线被锁） */
+    /* CS 申请失败 */
     s_mock_ctx.inject_cs_low_fail = 1;
     TEST_ASSERT(W25QXX_Read(&dev, buf, 0x1000, 16) == W25QXX_ERROR_BUS, "Read returns ERROR_BUS on cs_low failure");
     TEST_ASSERT(W25QXX_Write_NoCheck(&dev, buf, 0x1000, 16) == W25QXX_ERROR_BUS, "Write returns ERROR_BUS on cs_low failure");
@@ -430,16 +428,14 @@ static void test_wait_busy_and_timeout(void)
     mock_flash_reset();
     W25QXX_Device dev;
     W25QXX_Init(&dev, &s_mock_bus);
-    uint8_t data[256];
-    memset(data, 0x33, sizeof(data));
 
-    /* 场景 A：状态寄存器读失败，绝不把错误数据误判为 BUSY=0 完成 */
+    /* 场景 A：状态寄存器读失败 */
     s_mock_ctx.inject_status_reg_swap_err = 1;
     W25QXX_Result res_a = W25QXX_EraseSector(&dev, 0x2000);
-    TEST_ASSERT(res_a == W25QXX_ERROR_BUS, "WaitBusy returns ERROR_BUS immediately when status read fails (never misjudges as OK)");
+    TEST_ASSERT(res_a == W25QXX_ERROR_BUS, "WaitBusy returns ERROR_BUS immediately when status read fails");
     s_mock_ctx.inject_status_reg_swap_err = 0;
 
-    /* 场景 B：BUSY 硬件超时（模拟 Flash 锁死，不置位完成） */
+    /* 场景 B：BUSY 硬件超时 */
     s_mock_ctx.inject_busy_timeout = 1;
     W25QXX_Result res_b = W25QXX_EraseSector(&dev, 0x2000);
     TEST_ASSERT(res_b == W25QXX_ERROR_TIMEOUT, "WaitBusy accurately returns ERROR_TIMEOUT on long busy");
@@ -454,8 +450,7 @@ static void test_page_and_sector_cross_write(void)
     W25QXX_Device dev;
     W25QXX_Init(&dev, &s_mock_bus);
 
-    /* 跨页写（从页偏移 200 写 300 字节，覆盖页 0 末尾与页 1 开头） */
-    uint32_t cross_page_addr = 0x000100C8U; /* 200 字节偏移 */
+    uint32_t cross_page_addr = 0x000100C8U;
     uint16_t cross_page_len = 300U;
     uint8_t tx_buf[300], rx_buf[300];
 
@@ -463,20 +458,15 @@ static void test_page_and_sector_cross_write(void)
         tx_buf[i] = (uint8_t)(i ^ 0xA5U);
     }
 
-    /* 擦除所在扇区 */
     TEST_ASSERT(W25QXX_EraseSector(&dev, 0x00010000U) == W25QXX_OK, "EraseSector ok before cross-page write");
-
-    /* 自动翻页写 */
     TEST_ASSERT(W25QXX_Write_NoCheck(&dev, tx_buf, cross_page_addr, cross_page_len) == W25QXX_OK, "Write_NoCheck cross-page succeeds");
 
-    /* 读回校验 */
     memset(rx_buf, 0, sizeof(rx_buf));
     TEST_ASSERT(W25QXX_Read(&dev, rx_buf, cross_page_addr, cross_page_len) == W25QXX_OK, "Read cross-page data succeeds");
     TEST_ASSERT(memcmp(tx_buf, rx_buf, cross_page_len) == 0, "Cross-page read-back data byte-for-byte identical");
 
-    /* 跨扇区擦写综合测试 (W25QXX_Write 自动擦除多扇区) */
-    uint32_t cross_sector_addr = 0x00020FF0U; /* 扇区 32 末尾 16 字节 */
-    uint16_t cross_sector_len = 64U;         /* 跨入扇区 33 共 48 字节 */
+    uint32_t cross_sector_addr = 0x00020FF0U;
+    uint16_t cross_sector_len = 64U;
     uint8_t sec_tx[64], sec_rx[64];
     for (uint16_t i = 0; i < cross_sector_len; i++) {
         sec_tx[i] = (uint8_t)(i + 0x33U);
@@ -491,10 +481,170 @@ static void test_page_and_sector_cross_write(void)
     TEST_ASSERT(memcmp(sec_tx, sec_rx, cross_sector_len) == 0, "Cross-sector data byte-for-byte identical");
 }
 
+/* ====================================================================
+ * Stage 1.2-B Task 2: 片选释放 (CS_HIGH) 失败全链路故障注入测试 (T01 ~ T08)
+ * ==================================================================== */
+static void test_cs_high_failure_injection(void)
+{
+    printf("\n=== Test 6 (Stage 1.2-B): CS_HIGH Failure Injection (T01 ~ T08) ===\n");
+    mock_flash_reset();
+    W25QXX_Device dev;
+    W25QXX_Init(&dev, &s_mock_bus);
+    uint8_t buf[256];
+    memset(buf, 0xA5, sizeof(buf));
+
+    /* T01: ReadStatusReg 结束时 CS 释放失败 -> 必须返回 ERROR_BUS，且不得提交状态结果 */
+    {
+        uint8_t status = 0x55U;
+        s_mock_ctx.inject_cs_high_fail = 1;
+        W25QXX_Result r = W25QXX_ReadStatusReg(&dev, &status);
+        TEST_ASSERT(r == W25QXX_ERROR_BUS, "T01: ReadStatusReg returns ERROR_BUS when CS_HIGH fails");
+        TEST_ASSERT(status == 0x55U, "T01: ReadStatusReg does not commit result to output buffer on CS_HIGH failure");
+        s_mock_ctx.inject_cs_high_fail = 0;
+        s_mock_ctx.cs_asserted = 0;
+    }
+
+    /* T02: Read 数据结束时 CS 释放失败 -> 禁止返回 OK (返回 ERROR_BUS) */
+    {
+        s_mock_ctx.inject_cs_high_fail = 1;
+        W25QXX_Result r = W25QXX_Read(&dev, buf, 0x1000, 32);
+        TEST_ASSERT(r == W25QXX_ERROR_BUS, "T02: Read returns ERROR_BUS and NEVER returns OK when CS_HIGH fails");
+        s_mock_ctx.inject_cs_high_fail = 0;
+        s_mock_ctx.cs_asserted = 0;
+    }
+
+    /* T03: WriteEnable 结束时 CS 释放失败 -> 返回 ERROR_BUS，禁止继续下发编程 */
+    {
+        s_mock_ctx.page_program_count = 0;
+        s_mock_ctx.inject_cs_high_fail = 1;
+        W25QXX_Result r = W25QXX_WriteEnable(&dev);
+        TEST_ASSERT(r == W25QXX_ERROR_BUS, "T03: WriteEnable returns ERROR_BUS when CS_HIGH fails");
+        s_mock_ctx.inject_cs_high_fail = 0;
+        s_mock_ctx.cs_asserted = 0;
+    }
+
+    /* T04: Page Program 结束时 CS 释放失败 -> 不得报告编程成功 */
+    {
+        s_mock_ctx.inject_cs_high_fail = 1;
+        W25QXX_Result r = W25QXX_Write_NoCheck(&dev, buf, 0x1000, 64);
+        TEST_ASSERT(r == W25QXX_ERROR_BUS, "T04: Write_NoCheck returns ERROR_BUS and reports NO success on CS_HIGH fail");
+        s_mock_ctx.inject_cs_high_fail = 0;
+        s_mock_ctx.cs_asserted = 0;
+    }
+
+    /* T05: Sector Erase 结束时 CS 释放失败 -> 不得报告擦除成功 */
+    {
+        s_mock_ctx.inject_cs_high_fail = 1;
+        W25QXX_Result r = W25QXX_EraseSector(&dev, 0x1000);
+        TEST_ASSERT(r == W25QXX_ERROR_BUS, "T05: EraseSector returns ERROR_BUS and reports NO success on CS_HIGH fail");
+        s_mock_ctx.inject_cs_high_fail = 0;
+        s_mock_ctx.cs_asserted = 0;
+    }
+
+    /* T06: 检查故障发生时 CS 状态未被无声掩盖 */
+    {
+        s_mock_ctx.inject_cs_high_fail = 1;
+        (void)W25QXX_Read(&dev, buf, 0x2000, 16);
+        TEST_ASSERT(s_mock_ctx.cs_asserted == 1, "T06: CS hardware line remains asserted when CS_HIGH fails (no silent leak)");
+        s_mock_ctx.inject_cs_high_fail = 0;
+        /* 安全复位片选 */
+        s_mock_ctx.cs_asserted = 0;
+    }
+
+    /* T07: 故障恢复后重新访问，状态有效时才允许通信 */
+    {
+        TEST_ASSERT(s_mock_ctx.cs_asserted == 0, "T07: CS line clean before retry");
+        W25QXX_Result r = W25QXX_Read(&dev, buf, 0x1000, 16);
+        TEST_ASSERT(r == W25QXX_OK, "T07: Read succeeds immediately after hardware recovers");
+    }
+
+    /* T08: 正常通信回归检查（读、写、擦除全功能正常） */
+    {
+        TEST_ASSERT(W25QXX_EraseSector(&dev, 0x3000) == W25QXX_OK, "T08: Sector erase regression OK");
+        TEST_ASSERT(W25QXX_Write_NoCheck(&dev, buf, 0x3000, 16) == W25QXX_OK, "T08: Page write regression OK");
+        uint8_t verify[16];
+        TEST_ASSERT(W25QXX_Read(&dev, verify, 0x3000, 16) == W25QXX_OK, "T08: Read verify regression OK");
+        TEST_ASSERT(memcmp(buf, verify, 16) == 0, "T08: Verified data identical");
+    }
+}
+
+/* ====================================================================
+ * Stage 1.2-B Task 3: 重复读取数据一致性与数据篡改异常检测
+ * ==================================================================== */
+static void test_repeated_read_data_consistency(void)
+{
+    printf("\n=== Test 7 (Stage 1.2-B): Repeated Read Data Consistency & Mismatch Detection ===\n");
+    mock_flash_reset();
+    W25QXX_Device dev;
+    W25QXX_Init(&dev, &s_mock_bus);
+
+    /* 准备一段预置数据 */
+    for (uint32_t i = 0; i < 480; i++) {
+        s_mock_flash_mem[0x00100000U + i] = (uint8_t)(i ^ 0x5AU);
+    }
+
+    uint8_t ref_buf[480];
+    uint8_t rx_buf[480];
+    TEST_ASSERT(W25QXX_Read(&dev, ref_buf, 0x00100000U, 480) == W25QXX_OK, "Read reference buffer OK");
+
+    /* 1. 连续 1000 次 1B 重复读取，验证数据一致性与独立统计 */
+    uint32_t read_ok = 0;
+    uint32_t data_match_ok = 0;
+    uint32_t data_mismatch = 0;
+    uint8_t ref_byte = ref_buf[0];
+
+    for (int k = 0; k < 1000; k++) {
+        uint8_t b = 0;
+        if (W25QXX_Read(&dev, &b, 0x00100000U, 1) == W25QXX_OK) {
+            read_ok++;
+            if (b == ref_byte) {
+                data_match_ok++;
+            } else {
+                data_mismatch++;
+            }
+        }
+    }
+    TEST_ASSERT(read_ok == 1000, "1000/1000 repeated reads communication successful");
+    TEST_ASSERT(data_match_ok == 1000, "1000/1000 repeated reads data 100% consistent");
+    TEST_ASSERT(data_mismatch == 0, "0 data mismatches in consistent data test");
+
+    /* 2. 注入数据不一致故障：模拟存储单元数据突变或传输错误 */
+    s_mock_flash_mem[0x00100000U] = (uint8_t)(ref_byte ^ 0xFFU); /* 篡改首字节 */
+    uint8_t corrupted_byte = 0;
+    uint32_t first_mismatch_offset = 0xFFFFFFFFU;
+
+    W25QXX_Result cr = W25QXX_Read(&dev, &corrupted_byte, 0x00100000U, 1);
+    TEST_ASSERT(cr == W25QXX_OK, "Read communication succeeded even with mismatch data");
+    if (corrupted_byte != ref_byte) {
+        data_mismatch++;
+        first_mismatch_offset = 0;
+    }
+    TEST_ASSERT(data_mismatch == 1, "Data mismatch accurately detected and counted");
+    TEST_ASSERT(first_mismatch_offset == 0, "First mismatch offset accurately located at byte 0");
+
+    /* 3. 全长度矩阵（1~480B）重复对比测试 */
+    const uint16_t len_list[] = {1, 4, 8, 15, 16, 17, 32, 64, 256, 480};
+    uint8_t len_count = sizeof(len_list) / sizeof(len_list[0]);
+    uint8_t matrix_ok = 0;
+
+    /* 恢复正确数据 */
+    s_mock_flash_mem[0x00100000U] = ref_byte;
+
+    for (uint8_t i = 0; i < len_count; i++) {
+        uint16_t L = len_list[i];
+        memset(rx_buf, 0, L);
+        if (W25QXX_Read(&dev, rx_buf, 0x00100000U, L) == W25QXX_OK &&
+            memcmp(rx_buf, ref_buf, L) == 0) {
+            matrix_ok++;
+        }
+    }
+    TEST_ASSERT(matrix_ok == len_count, "All 10 lengths in matrix match byte-for-byte with reference data");
+}
+
 int main(void)
 {
     printf("====================================================\n");
-    printf("   Stage 1.2: W25Q128 Flash Host Reliability Tests   \n");
+    printf("   Stage 1.2 & 1.2-B: W25Q128 Flash Host Tests       \n");
     printf("====================================================\n");
 
     test_address_boundary_protection();
@@ -502,6 +652,8 @@ int main(void)
     test_spi_error_propagation();
     test_wait_busy_and_timeout();
     test_page_and_sector_cross_write();
+    test_cs_high_failure_injection();
+    test_repeated_read_data_consistency();
 
     printf("\n====================================================\n");
     printf(" Summary: %d/%d assertions passed (100%% PASS)\n", s_tests_passed, s_tests_run);
