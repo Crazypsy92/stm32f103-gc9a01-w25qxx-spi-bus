@@ -106,10 +106,12 @@ if (f_res == W25QXX_OK) {
 若要移植至 STM32F4、STM32G4、GD32、ESP-IDF 或 Linux 用户态 (spidev)，只需实现以下操作函数表并注册为 `spi_bus_t` 对象：
 
 ```c
+/* 与 BSP/Inc/spi_bus.h 的实际声明一致。ctx 位于 spi_bus_t 内。 */
 typedef struct {
-    int (*configure)(void *ctx, const spi_bus_config_t *cfg);
-    int (*transfer)(void *ctx, const void *tx, void *rx, size_t len);
-    int (*recover)(void *ctx);
+    int (*configure)(spi_bus_t *bus, const spi_bus_config_t *cfg);
+    int (*transfer)(spi_bus_t *bus, const uint8_t *tx,
+                    uint8_t *rx, uint32_t len);
+    int (*in_isr)(spi_bus_t *bus); /* 可选：ISR 上下文检测 */
 } spi_bus_ops_t;
 ```
 
@@ -117,10 +119,13 @@ typedef struct {
 
 1. **`configure`**：根据传入的 `cfg->clock_hz` 和 `cfg->mode` 配置底层外设波特率分频与 CPOL/CPHA。
 2. **`transfer`**：实现数据双向同步交换或单向发送（支持轮询或 DMA）。返回 0 表示成功，负数表示超时或硬件错误。
-3. **`recover`**：在总线异常（如从机拉死时钟、DMA 悬挂）时重置外设状态机。
+3. **`in_isr`**：可选；返回 1 表示当前是中断上下文，禁止在 ISR 中占用 SPI 总线。
+4. **异常恢复**：当前板级实现通过 `BSP_SPI_RecoverBus(bus)` 或底层 `spi_stm32_ll_recover()` 提供；`spi_bus_ops_t` 本身**没有** `recover` 函数指针。
+5. **延时移植**：`w25qxx.c` 当前通过 `delay.h` 使用 `Delay_us`/`Delay_ms`；移植到其他 MCU 前需提供对应时基，或者进一步将延时回调注入 W25QXX Port 层。
 
 ### 3. 当前移植与验证状态说明
 
 > [!NOTE]
 > - **已实机验证平台**：STM32F103C8T6 (Cortex-M3 @ 72MHz)，基于 STM32 LL 库与 DMA1。
-> - **其他平台状态**：系统协议层（`gc9a01.c` 与 `w25qxx.c`）已通过 Host 单元测试验证其纯 C 逻辑独立性；其他 MCU 平台的实际硬件适配器（Adapter）尚未在物理硬件上进行量产级回归，开发者如需移植需自行实现对应芯片的底层硬件驱动。
+> - **其他平台状态**：GC9A01 协议层已通过 Host Mock 测试；W25QXX 的 SPI 操作已通过 Port 回调隔离，但仍依赖项目的延时接口。其他 MCU 的真实硬件适配尚未验证，开发者应移植 SPI/GPIO/时间基准后分别测试。
+- **写入风险**：`W25QXX_Write()` 不是保留扇区原有数据的通用局部更新。它会先擦除受影响的整个 4KB 扇区，随后只写入指定缓冲；无关数据可能丢失。正式 Demo 无任何写入行为。

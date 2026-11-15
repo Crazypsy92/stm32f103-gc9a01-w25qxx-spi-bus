@@ -10,7 +10,7 @@
 #include <string.h>
 
 /* 裸机版：状态机与事件识别算法保持不变，不含任何 RTOS 依赖。
- * 由主循环按 TICKS_INTERVAL(5ms) 节拍调用 button_ticks() 驱动，
+ * 由 KEY_OnSysTick1ms() 每 TICKS_INTERVAL(5ms) 调用 button_ticks() 驱动，
  * 事件通过 button_attach() 注册的回调函数向上层传递。 */
 
 // Configuration constants - can be modified according to your needs

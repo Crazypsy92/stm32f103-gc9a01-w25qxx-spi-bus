@@ -193,8 +193,8 @@ static void render_flash_read_page(void)
     snprintf(line, sizeof(line), "Verify: 32B Match [%s]", match_ok ? "PASS" : "FAIL");
     LCD_ShowString(&g_lcd, 40U, 138U, line, match_ok ? GREEN : RED, BLACK, 12U, 0U);
 
-    snprintf(line, sizeof(line), "Erase Count: 0 (SAFE)");
-    LCD_ShowString(&g_lcd, 40U, 156U, line, YELLOW, BLACK, 12U, 0U);
+    /* This demo never erases Flash. Do not claim to measure historical erases. */
+    LCD_ShowString(&g_lcd, 40U, 156U, "Mode: READ ONLY", YELLOW, BLACK, 12U, 0U);
 
     snprintf(line, sizeof(line), "Read Rounds: %lu", (unsigned long)s_flash_read_count);
     LCD_ShowString(&g_lcd, 40U, 172U, line, LGRAY, BLACK, 12U, 0U);

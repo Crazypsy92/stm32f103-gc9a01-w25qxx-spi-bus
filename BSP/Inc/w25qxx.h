@@ -112,7 +112,9 @@ W25QXX_Result W25QXX_WriteEnable(W25QXX_Device *dev);
 /* 读取操作 */
 W25QXX_Result W25QXX_Read(W25QXX_Device *dev, uint8_t *pBuffer, uint32_t ReadAddr, uint32_t NumByteToRead);
 
-/* 写入操作 (智能处理：自动擦除扇区、自动翻页) */
+/* 注意：破坏性覆盖写！此函数先擦除涉及的全部 4KB 扇区，再仅写入指定缓冲；
+ * 该扇区其他地址的旧数据不会保留。若要安全局部更新，请自行先备份并
+ * read-modify-erase-write，且应考虑掉电恢复。本工程 Demo 不调用此 API。 */
 W25QXX_Result W25QXX_Write(W25QXX_Device *dev, const uint8_t *pBuffer, uint32_t WriteAddr, uint32_t NumByteToWrite);
 
 /* 写入操作 (仅页写，不带擦除) */

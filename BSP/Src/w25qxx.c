@@ -544,7 +544,8 @@ W25QXX_Result W25QXX_EraseChip(W25QXX_Device *dev)
 }
 
 /**
- * @brief  带擦除的写操作 (自动扇区擦除并写入)
+ * @brief  破坏性写操作：先擦除涉及的完整扇区，再写入给定数据。
+ * @warning 同扇区不在本次写入范围内的原始数据将丢失！
  */
 W25QXX_Result W25QXX_Write(W25QXX_Device *dev, const uint8_t *pBuffer,
                            uint32_t WriteAddr, uint32_t NumByteToWrite)

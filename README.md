@@ -1,7 +1,7 @@
 # STM32F103 双 SPI 驱动与交互式 Demo (GC9A01 TFT + W25Q128 Flash)
 
 [![Host Tests CI](https://github.com/Crazypsy92/stm32f103-gc9a01-w25qxx-spi-bus/actions/workflows/host-tests.yml/badge.svg)](https://github.com/Crazypsy92/stm32f103-gc9a01-w25qxx-spi-bus/actions/workflows/host-tests.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+<!-- 项目许可证尚未确定；正式发布前需按原始依赖许可选择并添加 LICENSE。 -->
 [![MCU](https://img.shields.io/badge/MCU-STM32F103C8T6-blue.svg)](https://www.st.com)
 [![Build](https://img.shields.io/badge/Build-CMake%20%7C%20Ninja-brightgreen.svg)]()
 
@@ -30,11 +30,11 @@
 
 ## 一、项目特性
 
-- **双独立 SPI 并发架构**：
+- **双独立 SPI 总线架构**：
   - **SPI1 (18 MHz + DMA1 Ch3/Ch2)**：专用驱动 GC9A01 240×240 彩色圆屏，高速流畅刷屏。
   - **SPI2 (9 MHz + DMA1 Ch5/Ch4)**：专用驱动 W25Q128 16MB NOR Flash，大容量稳定存储。
 - **高内聚低耦合分层架构**：
-  - 核心协议驱动（`gc9a01.c` 与 `w25qxx.c`）为**纯 C 实现**，零 MCU 寄存器与底层库依赖，支持跨平台移植。
+  - GC9A01 协议层不直接依赖 MCU 寄存器；W25QXX 协议层也无直接寄存器操作，但当前仍通过 `delay.h` 间接使用板级延时，跨 MCU 移植需适配该依赖。
   - 硬件总线层提供独占互斥仲裁、嵌套重入、中断抢占防御与动态配置注入能力。
 - **内存极致优化（轻量安全）**：
   - **零全屏显存**：采用行缓冲技术（<= 480 字节），彻底消除 115 KB 全屏 FrameBuffer 开销。
@@ -45,7 +45,7 @@
   - 基于 MultiButton 状态机，使用单个按键（KEY1 / PB12）实现单击切换、长按进入/退出的完整圆屏 UI 导航。
   - 板载 LED (PC13) 提供瞬态按键响应视觉反馈。
 - **完善的测试体系**：
-  - 提供 5 套 Host 端自动化单元测试，支持 CTest 与 ASan/UBSan 内存安全检查。
+  - 提供 6 套 Host 端自动化单元测试（包括 KEY1 时序回归），支持 CTest 与 ASan/UBSan 内存安全检查。
   - 提供独立的硬件在环 (HIL) 自动化回归与极简屏幕诊断模式。
 
 ---
@@ -298,7 +298,7 @@ stm32f103-gc9a01-w25qxx-spi-bus/
 ├── cmake/                         # 工具链与 CubeMX 构建配置
 │
 ├── tests/
-│   ├── host/                      # PC 端 5 套 Host 单元测试与 CTest
+│   ├── host/                      # PC 端 6 套 Host 单元测试与 CTest
 │   └── target/                    # 目标板 HIL 自动化回归与诊断测试 (app_hil_test.c)
 │
 ├── doc/                           # 开发与技术文档
@@ -318,7 +318,8 @@ stm32f103-gc9a01-w25qxx-spi-bus/
 ## 十三、已知限制
 
 1. **屏幕背光控制**：当前工程未连接独立 PWM 调光引脚，BLK 直连 3.3V 保持常亮。
-2. **Flash 擦写限制**：正式应用 Demo 仅开放只读接口，不执行物理擦除与写入操作，确保零磨损。
+2. **Flash 擦写限制**：正式应用 Demo 仅执行只读操作，不执行物理擦除与写入。**开发者调用 `W25QXX_Write()` 前请注意：它会擦除所涉及的整个 4KB 扇区，未包含在本次写入范围内的同扇区旧数据不会保留。** 非破坏性局部写入尚未实现。
+4. **许可证状态**：仓库尚未包含根目录 `LICENSE`，须确认主项目及第三方 MultiButton 等组件的许可后再对外宣称特定开源许可证。
 3. **跨 MCU 移植**：当前已完成实机验证的芯片为 STM32F103 系列，若移植至其他 MCU 系列，需根据 `doc/porting_guide.md` 实现对应的 `spi_bus_ops_t` 适配层。
 
 ---
