@@ -23,7 +23,13 @@ add_executable(test_flash test_flash.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../BSP/Src/w25qxx.c)
 target_include_directories(test_flash PRIVATE ${STUB_DIR} ${BSP_INC})
 
+# ---- GC9A01 驱动规范化与可移植测试 (Stage 2.1: 编译真实 gc9a01.c) ----
+add_executable(test_gc9a01 test_gc9a01.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../BSP/Src/gc9a01.c)
+target_include_directories(test_gc9a01 PRIVATE ${STUB_DIR} ${BSP_INC})
+
 enable_testing()
-add_test(NAME bus   COMMAND test_bus)
-add_test(NAME ll    COMMAND test_ll)
-add_test(NAME flash COMMAND test_flash)
+add_test(NAME bus    COMMAND test_bus)
+add_test(NAME ll     COMMAND test_ll)
+add_test(NAME flash  COMMAND test_flash)
+add_test(NAME gc9a01 COMMAND test_gc9a01)

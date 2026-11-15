@@ -2,8 +2,9 @@
  * @file    gc9a01_port.c
  * @brief   GC9A01 移植层实现（STM32F1 + LL 库）
  * @details 本文件只负责板级资源：CS/RST/DC 引脚、SPI1 总线绑定与延时实现，
- *          并填充 GC9A01.h 中的 LCD_Port 回调表。
+ *          并填充 gc9a01.h 中的 LCD_Port 回调表。
  *          SPI1 外设本身由 bsp_spi.c 统一管理，与 W25QXX 共享，不再重复初始化。
+ *          Stage 2.1: 规范化 Port_Cs 与 Port_Write 错误返回值，向协议层正确上报总线与片选状态。
  */
 #include "gc9a01_port.h"
 #include "bsp_spi.h"
@@ -11,7 +12,7 @@
 #include "delay.h"
 
 /* ================================================================================== */
-/* 板级配置（按实际硬件修改）                                         */
+/* 板级配置（已核实硬件接线）                                                         */
 /* ================================================================================== */
 
 /* 接线：SCK=PA5  MOSI=PA7  CS=PA9  RES=PA10  DC=PB13  背光未接控制引脚（常亮） */
@@ -30,7 +31,7 @@
 #define GC9A01_SPI_USE_DMA  1
 
 /* ================================================================================== */
-/* 内部变量                                                           */
+/* 内部变量                                                                           */
 /* ================================================================================== */
 
 /** @brief 移植层上下文：共享总线 + 本设备的速率/模式 */
@@ -45,24 +46,34 @@ static GC9A01_HW s_hw;
 LCD_Device g_lcd;
 
 /* ================================================================================== */
-/* LCD_Port 回调实现（STM32 相关代码全部集中在这里）                        */
+/* LCD_Port 回调实现（STM32 相关代码全部集中在这里）                                  */
 /* ================================================================================== */
 
-static void Port_Cs(void *ctx, uint8_t level)
+static LCD_Result Port_Cs(void *ctx, uint8_t level)
 {
     GC9A01_HW *hw = (GC9A01_HW *)ctx;
+    if (hw == NULL || hw->bus == NULL) {
+        return LCD_ERROR_PARAM;
+    }
 
     if (level == 0U) {
-        /* 占用总线并切到本设备参数；被其它设备占用时保持 CS 高，避免误伤 */
+        /* 占用总线并切到本设备参数；被其它设备占用时拒绝抢占，保持 CS 高避免误伤 */
         if (spi_bus_acquire(hw->bus, hw, &hw->cfg) != 0) {
-            return;
+            return LCD_ERROR_BUS;
         }
         LL_GPIO_ResetOutputPin(GC9A01_CS_PORT, GC9A01_CS_PIN);
+        return LCD_OK;
     } else {
         /* 仅当本次 release 真正交还总线（depth 归零）才拉高 CS；
            嵌套事务未结束时 CS 必须保持有效，避免提前结束当前命令 */
-        if (spi_bus_release(hw->bus, hw) > 0) {
+        int rel = spi_bus_release(hw->bus, hw);
+        if (rel > 0) {
             LL_GPIO_SetOutputPin(GC9A01_CS_PORT, GC9A01_CS_PIN);
+            return LCD_OK;
+        } else if (rel == 0) {
+            return LCD_OK; /* 嵌套事务保持 CS 有效 */
+        } else {
+            return LCD_ERROR_BUS; /* 释放失败（状态损坏或非法调用） */
         }
     }
 }
@@ -87,14 +98,29 @@ static void Port_Dc(void *ctx, uint8_t level)
     }
 }
 
-static void Port_Write(void *ctx, const uint8_t *buf, uint16_t len)
+static LCD_Result Port_Write(void *ctx, const uint8_t *buf, uint16_t len)
 {
     GC9A01_HW *hw = (GC9A01_HW *)ctx;
+    if (hw == NULL || hw->bus == NULL) {
+        return LCD_ERROR_PARAM;
+    }
+    if (len == 0U) {
+        return LCD_OK;
+    }
+    if (buf == NULL) {
+        return LCD_ERROR_PARAM;
+    }
 
     /* 只有本设备仍持有总线时才发送，防止写进别人的事务 */
-    if (spi_bus_owner(hw->bus) == hw) {
-        (void)spi_bus_transfer(hw->bus, hw, buf, NULL, len);
+    if (spi_bus_owner(hw->bus) != hw) {
+        return LCD_ERROR_BUS;
     }
+
+    int32_t res = spi_bus_transfer(hw->bus, hw, buf, NULL, len);
+    if (res != 0) {
+        return (res == -2) ? LCD_ERROR_TIMEOUT : LCD_ERROR_BUS;
+    }
+    return LCD_OK;
 }
 
 static void Port_DelayMs(void *ctx, uint32_t ms)
@@ -104,7 +130,7 @@ static void Port_DelayMs(void *ctx, uint32_t ms)
 }
 
 /* ================================================================================== */
-/* 硬件初始化                                                         */
+/* 硬件初始化                                                                         */
 /* ================================================================================== */
 
 static void GC9A01_GPIO_Init(void)
@@ -146,18 +172,19 @@ static void GC9A01_GPIO_Init(void)
 }
 
 /* ================================================================================== */
-/* 移植接口实现                                                       */
+/* 移植接口实现                                                                       */
 /* ================================================================================== */
 
 /* 抽象端口：驱动只通过这张表访问硬件，背光未接控制引脚故 bl 为 NULL */
 static const LCD_Port s_lcd_port = {
-    .cs       = Port_Cs,
-    .rst      = Port_Rst,
-    .dc       = Port_Dc,
-    .bl       = NULL,
-    .delay_ms = Port_DelayMs,
-    .write    = Port_Write,
-    .ctx      = &s_hw,
+    .cs            = Port_Cs,
+    .rst           = Port_Rst,
+    .dc            = Port_Dc,
+    .bl            = NULL,
+    .delay_ms      = Port_DelayMs,
+    .write         = Port_Write,
+    .max_chunk_len = 65535U,
+    .ctx           = &s_hw,
 };
 
 void GC9A01_PortInit(void)
@@ -172,5 +199,5 @@ void GC9A01_PortInit(void)
     GC9A01_GPIO_Init();
 
     /* 3. 绑定端口并完成面板初始化 */
-    GC9A01_Init(&g_lcd, &s_lcd_port);
+    (void)GC9A01_Init(&g_lcd, &s_lcd_port);
 }

@@ -76,11 +76,43 @@ typedef struct {
 volatile app_dual_test_result_t g_app_dual_result;
 
 /**
+ * @brief GC9A01 全屏流式图案演示：240 行 × 240 像素 (115,200 字节)，
+ *        使用 480B 小行缓冲逐行流式生成，验证 MCU 有限内存下的全屏刷屏能力。
+ */
+static void AppTFT_StreamPattern(void)
+{
+    static uint8_t line_buf[LCD_W * 2];
+    static const uint16_t color_table[8] = { RED, GREEN, BLUE, YELLOW, CYAN, MAGENTA, WHITE, DARKBLUE };
+    if (LCD_Address_Set(&g_lcd, 0, 0, LCD_W - 1, LCD_H - 1) != LCD_OK) {
+        return;
+    }
+    if (g_lcd.port->cs(g_lcd.port->ctx, 0) != LCD_OK) {
+        return;
+    }
+    g_lcd.port->dc(g_lcd.port->ctx, 1);
+    for (uint16_t y = 0; y < LCD_H; y++) {
+        uint16_t c = color_table[(y / 30U) % 8U];
+        for (uint16_t x = 0; x < LCD_W; x++) {
+            line_buf[x * 2U]     = (uint8_t)(c >> 8);
+            line_buf[x * 2U + 1] = (uint8_t)(c & 0xFF);
+        }
+        if (g_lcd.port->write(g_lcd.port->ctx, line_buf, LCD_W * 2U) != LCD_OK) {
+            break;
+        }
+    }
+    (void)g_lcd.port->cs(g_lcd.port->ctx, 1);
+    Delay_ms(400);
+}
+
+/**
  * @brief GC9A01 上电显示自测
  */
 void AppTFT_Test(void)
 {
-    /* 圆形屏引导页：不占用额外帧缓冲，RGB 色块同时检验颜色通路。 */
+    /* 1. 全屏流式 8 色条测试图案 (115,200 字节，480B 行缓冲) */
+    AppTFT_StreamPattern();
+
+    /* 2. 圆形屏引导页：不占用额外帧缓冲，RGB 色块同时检验颜色通路。 */
     LCD_Fill(&g_lcd, 0, 0, LCD_W, LCD_H, BLACK);
     Draw_Circle(&g_lcd, 120, 120, 113, DARKBLUE);
     LCD_ShowString(&g_lcd, 68, 34, "SPI1 LAB", CYAN, BLACK, 24, 0);
