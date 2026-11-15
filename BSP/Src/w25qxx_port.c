@@ -215,8 +215,8 @@ W25QXX_Result W25QXX_PortInitWithConfig(W25QXX_Device *dev, const W25QXX_PortCon
 
     /* 若重复初始化且原先仍持有总线锁，先安全释放清理 */
     if (ctx->in_use && ctx->bus != NULL && ctx->bus->owner == ctx) {
-        while (ctx->bus->depth > 0) {
-            (void)spi_bus_release(ctx->bus, ctx);
+        while (ctx->bus->depth > 0U) {
+            if (spi_bus_release(ctx->bus, ctx) < 0) return W25QXX_ERROR_BUS;
         }
     }
 

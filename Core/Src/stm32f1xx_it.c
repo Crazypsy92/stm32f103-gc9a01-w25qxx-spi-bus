@@ -190,6 +190,9 @@ void SysTick_Handler(void)
   /* USER CODE BEGIN SysTick_IRQn 1 */
   /* 1ms 心跳：只递增毫秒计数 */
   g_sys_tick++;
+#if (!defined(CONFIG_HIL_TESTS) || (CONFIG_HIL_TESTS == 0)) && (!defined(CONFIG_TFT_ONLY) || (CONFIG_TFT_ONLY == 0))
+  KEY_OnSysTick1ms();
+#endif
   /* USER CODE END SysTick_IRQn 1 */
 }
 

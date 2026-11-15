@@ -249,46 +249,43 @@ static void render_dual_spi_page(void)
  */
 static void render_key_test_page(uint8_t full_redraw)
 {
+    static uint8_t prev_level = 0xFFU;
+    static uint32_t prev_clicks = UINT32_MAX, prev_longs = UINT32_MAX;
     if (full_redraw) {
         LCD_Fill(&g_lcd, 0U, 0U, LCD_W, LCD_H, BLACK);
         Draw_Circle(&g_lcd, 120U, 120U, 118U, DARKBLUE);
-
         LCD_ShowString(&g_lcd, 52U, 24U, "4. KEY1 INPUT TEST", YELLOW, BLACK, 16U, 0U);
         LCD_ShowString(&g_lcd, 64U, 44U, "PB12 GPIO & Debounce", GRAY, BLACK, 12U, 0U);
-
         LCD_ShowString(&g_lcd, 44U, 66U, "Pin : PB12 (Pull-Up)", WHITE, BLACK, 12U, 0U);
         LCD_ShowString(&g_lcd, 44U, 82U, "LED : PC13 (Active Low)", WHITE, BLACK, 12U, 0U);
-
         render_bottom_prompt("Count");
+        prev_level = 0xFFU;
+        prev_clicks = UINT32_MAX;
+        prev_longs = UINT32_MAX;
     }
 
-    uint8_t raw_level = KEY_GetRawLevel();
-    uint32_t clicks   = KEY_GetClickCount();
-    uint32_t longs    = KEY_GetLongCount();
-
+    uint8_t level = KEY_GetRawLevel();
+    uint32_t clicks = KEY_GetClickCount(), longs = KEY_GetLongCount();
     char line[36];
-
-    /* 实时电平 */
-    snprintf(line, sizeof(line), "Level: %s (%u)       ",
-             (raw_level == 0U) ? "PRESSED " : "RELEASED", raw_level);
-    LCD_ShowString(&g_lcd, 44U, 102U, line, (raw_level == 0U) ? YELLOW : CYAN, BLACK, 12U, 0U);
-
-    /* 短按累计 */
-    snprintf(line, sizeof(line), "Clicks : %-6lu", (unsigned long)clicks);
-    LCD_ShowString(&g_lcd, 44U, 120U, line, GREEN, BLACK, 12U, 0U);
-
-    /* 长按累计 */
-    snprintf(line, sizeof(line), "Longs  : %-6lu", (unsigned long)longs);
-    LCD_ShowString(&g_lcd, 44U, 138U, line, LGRAY, BLACK, 12U, 0U);
-
-    /* 状态圆环/实心圆 */
-    if (raw_level == 0U) {
-        /* 按下时填充绿色小圆 */
-        LCD_Fill(&g_lcd, 110U, 158U, 130U, 178U, GREEN);
-    } else {
-        /* 释放时清空为圆环 */
-        LCD_Fill(&g_lcd, 110U, 158U, 130U, 178U, BLACK);
-        Draw_Circle(&g_lcd, 120U, 168U, 9U, GRAY);
+    if (level != prev_level) {
+        LCD_Fill(&g_lcd, 44U, 102U, 204U, 115U, BLACK);
+        snprintf(line, sizeof(line), "Level: %s", level ? "RELEASED" : "PRESSED");
+        LCD_ShowString(&g_lcd, 44U, 102U, line, level ? CYAN : YELLOW, BLACK, 12U, 0U);
+        LCD_Fill(&g_lcd, 110U, 158U, 130U, 178U, level ? BLACK : GREEN);
+        if (level) Draw_Circle(&g_lcd, 120U, 168U, 9U, GRAY);
+        prev_level = level;
+    }
+    if (clicks != prev_clicks) {
+        LCD_Fill(&g_lcd, 44U, 120U, 204U, 133U, BLACK);
+        snprintf(line, sizeof(line), "Clicks : %lu", (unsigned long)clicks);
+        LCD_ShowString(&g_lcd, 44U, 120U, line, GREEN, BLACK, 12U, 0U);
+        prev_clicks = clicks;
+    }
+    if (longs != prev_longs) {
+        LCD_Fill(&g_lcd, 44U, 138U, 204U, 151U, BLACK);
+        snprintf(line, sizeof(line), "Longs  : %lu", (unsigned long)longs);
+        LCD_ShowString(&g_lcd, 44U, 138U, line, LGRAY, BLACK, 12U, 0U);
+        prev_longs = longs;
     }
 }
 
@@ -312,7 +309,7 @@ void AppDemo_Run(void)
     if (s_current_page == DEMO_PAGE_KEY_TEST) {
         static uint32_t s_last_key_refresh = 0;
         uint32_t now = GetTick_ms();
-        if ((uint32_t)(now - s_last_key_refresh) >= 50U) {
+        if ((uint32_t)(now - s_last_key_refresh) >= 100U) {
             s_last_key_refresh = now;
             render_key_test_page(0U);
         }

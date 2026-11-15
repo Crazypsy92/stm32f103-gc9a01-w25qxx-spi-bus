@@ -29,9 +29,13 @@ void KEY_Init(void);
 
 /**
  * @brief 按键心跳扫描任务
- * @details 内部自带 5ms 定时节拍，应在主循环中无阻塞周期性调用
+ * @details 主循环负责 LED 反馈；5ms 扫描节拍由 SysTick 中断保证
  */
 void KEY_Task(void);
+
+/** Called once per 1ms by SysTick_Handler. The real button scan runs every 5ms.
+ * Callback only records events; no display or SPI operation in the IRQ. */
+void KEY_OnSysTick1ms(void);
 
 /**
  * @brief 读取并消费当前按键事件

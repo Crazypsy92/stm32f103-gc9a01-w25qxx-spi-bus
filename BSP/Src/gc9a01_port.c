@@ -235,8 +235,8 @@ LCD_Result GC9A01_PortInitWithConfig(LCD_Device *dev, const GC9A01_PortConfig *c
 
     /* 若重复初始化且原先仍持有总线锁，先安全释放清理 */
     if (hw->in_use && hw->bus != NULL && hw->bus->owner == hw) {
-        while (hw->bus->depth > 0) {
-            (void)spi_bus_release(hw->bus, hw);
+        while (hw->bus->depth > 0U) {
+            if (spi_bus_release(hw->bus, hw) < 0) return LCD_ERROR_BUS;
         }
     }
 

@@ -14,7 +14,21 @@
 static Button s_key1;
 
 /* 待处理事件标志与统计 */
-static volatile key_event_t s_pending_event = KEY_EVENT_NONE;
+/* Recorded in the 5ms SysTick callback, consumed by the foreground. */
+#define KEY_BIT_SHORT  (1U << 0)
+#define KEY_BIT_LONG   (1U << 1)
+static volatile uint8_t s_pending_bits = 0U;
+static volatile uint8_t s_led_toggles = 0U;
+static volatile uint8_t s_ready = 0U;
+static uint8_t s_tick_divider = 0U;
+static uint32_t key_critical_enter(void) {
+    uint32_t previous = __get_PRIMASK();
+    __disable_irq();
+    return previous;
+}
+static void key_critical_exit(uint32_t previous) {
+    if (previous == 0U) __enable_irq();
+}
 static volatile uint32_t   s_click_count    = 0;
 static volatile uint32_t   s_long_count     = 0;
 
@@ -40,15 +54,15 @@ static void key1_event_callback(Button *btn)
     switch (ev)
     {
         case BTN_SINGLE_CLICK:
-            s_pending_event = KEY_EVENT_SHORT;
+            s_pending_bits |= KEY_BIT_SHORT;
             s_click_count++;
-            KEY_ToggleLED();
+            s_led_toggles++;
             break;
 
         case BTN_LONG_PRESS_START:
-            s_pending_event = KEY_EVENT_LONG;
+            s_pending_bits |= KEY_BIT_LONG;
             s_long_count++;
-            KEY_ToggleLED();
+            s_led_toggles++;
             break;
 
         default:
@@ -58,6 +72,7 @@ static void key1_event_callback(Button *btn)
 
 void KEY_Init(void)
 {
+    if (s_ready) return; /* Never register the same list node twice. */
     LL_GPIO_InitTypeDef GPIO_InitStruct = {0};
 
     LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_GPIOB);
@@ -82,24 +97,45 @@ void KEY_Init(void)
     button_init(&s_key1, key1_read_pin, 0, 1);
     button_attach(&s_key1, BTN_SINGLE_CLICK,     key1_event_callback);
     button_attach(&s_key1, BTN_LONG_PRESS_START, key1_event_callback);
-    button_start(&s_key1);
+    s_pending_bits = 0U;
+    s_led_toggles = 0U;
+    s_tick_divider = 0U;
+    if (button_start(&s_key1) == 0) s_ready = 1U;
 }
 
-void KEY_Task(void)
+/* Key scanner runs from the 1ms SysTick, not from blocking TFT main loop.
+ * Only GPIO input and event flags are handled here, never SPI or LCD. */
+void KEY_OnSysTick1ms(void)
 {
-    static uint32_t s_last_tick = 0;
-    uint32_t now = GetTick_ms();
-
-    if ((uint32_t)(now - s_last_tick) >= TICKS_INTERVAL) {
-        s_last_tick = now;
+    if (!s_ready) return;
+    if (++s_tick_divider >= TICKS_INTERVAL) {
+        s_tick_divider = 0U;
         button_ticks();
     }
 }
 
+/* Non-interrupt work stays in the foreground. */
+void KEY_Task(void)
+{
+    uint32_t state = key_critical_enter();
+    uint8_t flips = s_led_toggles;
+    s_led_toggles = 0U;
+    key_critical_exit(state);
+    if ((flips & 1U) != 0U) KEY_ToggleLED();
+}
+
 key_event_t KEY_GetEvent(void)
 {
-    key_event_t ev = s_pending_event;
-    s_pending_event = KEY_EVENT_NONE;
+    key_event_t ev = KEY_EVENT_NONE;
+    uint32_t state = key_critical_enter();
+    if (s_pending_bits & KEY_BIT_LONG) {
+        s_pending_bits &= (uint8_t)~KEY_BIT_LONG;
+        ev = KEY_EVENT_LONG;
+    } else if (s_pending_bits & KEY_BIT_SHORT) {
+        s_pending_bits &= (uint8_t)~KEY_BIT_SHORT;
+        ev = KEY_EVENT_SHORT;
+    }
+    key_critical_exit(state);
     return ev;
 }
 
