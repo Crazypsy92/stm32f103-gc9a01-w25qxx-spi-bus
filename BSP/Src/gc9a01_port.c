@@ -187,7 +187,7 @@ static const LCD_Port s_lcd_port = {
     .ctx           = &s_hw,
 };
 
-void GC9A01_PortInit(void)
+LCD_Result GC9A01_PortInit(void)
 {
     /* 1. 绑定共享的 SPI1 总线与本设备参数 */
     s_hw.bus = BSP_SPI1_GetBus();
@@ -199,5 +199,5 @@ void GC9A01_PortInit(void)
     GC9A01_GPIO_Init();
 
     /* 3. 绑定端口并完成面板初始化 */
-    (void)GC9A01_Init(&g_lcd, &s_lcd_port);
+    return GC9A01_Init(&g_lcd, &s_lcd_port);
 }

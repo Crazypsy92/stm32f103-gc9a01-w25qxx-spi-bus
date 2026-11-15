@@ -85,7 +85,11 @@ static LCD_Result LCD_Writ_Bus(LCD_Device *dev, uint8_t dat)
  * @brief 连续发送多字节（支持任意长度，根据 Port 限制自动分块传输）
  * @note  分块期间 CS 和 DC 保持当前状态，任何分块失败中止后续传输并返回错误。
  */
+#ifdef HOST_TEST
+LCD_Result LCD_Writ_Bytes(LCD_Device *dev, const uint8_t *buf, uint32_t len)
+#else
 static LCD_Result LCD_Writ_Bytes(LCD_Device *dev, const uint8_t *buf, uint32_t len)
+#endif
 {
     if (dev == NULL || dev->port == NULL || dev->port->write == NULL) {
         return LCD_SetError(dev, LCD_ERROR_PARAM);
@@ -603,7 +607,10 @@ LCD_Result LCD_DrawLine(LCD_Device *dev, uint16_t x1, uint16_t y1, uint16_t x2, 
 
     for (t = 0; t <= distance + 1; t++) {
         if (uRow >= 0 && uCol >= 0 && (uint16_t)uRow < dev->max_x && (uint16_t)uCol < dev->max_y) {
-            LCD_DrawPoint(dev, (uint16_t)uRow, (uint16_t)uCol, color);
+            LCD_Result res = LCD_DrawPoint(dev, (uint16_t)uRow, (uint16_t)uCol, color);
+            if (res != LCD_OK) {
+                return res;
+            }
         }
         xerr += delta_x;
         yerr += delta_y;
@@ -627,10 +634,15 @@ LCD_Result LCD_DrawRectangle(LCD_Device *dev, uint16_t x1, uint16_t y1, uint16_t
     if (x1 > x2 || y1 > y2 || x2 >= dev->max_x || y2 >= dev->max_y) {
         return LCD_SetError(dev, LCD_ERROR_PARAM);
     }
-    LCD_DrawLine(dev, x1, y1, x2, y1, color);
-    LCD_DrawLine(dev, x1, y1, x1, y2, color);
-    LCD_DrawLine(dev, x1, y2, x2, y2, color);
-    LCD_DrawLine(dev, x2, y1, x2, y2, color);
+    LCD_Result res;
+    res = LCD_DrawLine(dev, x1, y1, x2, y1, color);
+    if (res != LCD_OK) return res;
+    res = LCD_DrawLine(dev, x1, y1, x1, y2, color);
+    if (res != LCD_OK) return res;
+    res = LCD_DrawLine(dev, x1, y2, x2, y2, color);
+    if (res != LCD_OK) return res;
+    res = LCD_DrawLine(dev, x2, y1, x2, y2, color);
+    if (res != LCD_OK) return res;
     return LCD_OK;
 }
 
@@ -641,16 +653,35 @@ LCD_Result Draw_Circle(LCD_Device *dev, uint16_t x0, uint16_t y0, uint8_t r, uin
     }
     int a = 0, b = r;
     int di = 3 - (r << 1);
+    LCD_Result res;
 
     while (a <= b) {
-        if (x0 >= b && y0 >= a) LCD_DrawPoint(dev, x0 - b, y0 - a, color);
-        LCD_DrawPoint(dev, x0 + b, y0 - a, color);
-        if (x0 >= a && y0 >= b) LCD_DrawPoint(dev, x0 - a, y0 + b, color);
-        if (x0 >= a && y0 >= b) LCD_DrawPoint(dev, x0 - a, y0 - b, color);
-        LCD_DrawPoint(dev, x0 + b, y0 + a, color);
-        if (x0 >= b) LCD_DrawPoint(dev, x0 + a, y0 - b, color);
-        LCD_DrawPoint(dev, x0 + a, y0 + b, color);
-        if (x0 >= b) LCD_DrawPoint(dev, x0 - b, y0 + a, color);
+        if (x0 >= b && y0 >= a) {
+            res = LCD_DrawPoint(dev, x0 - b, y0 - a, color);
+            if (res != LCD_OK) return res;
+        }
+        res = LCD_DrawPoint(dev, x0 + b, y0 - a, color);
+        if (res != LCD_OK) return res;
+        if (x0 >= a && y0 >= b) {
+            res = LCD_DrawPoint(dev, x0 - a, y0 + b, color);
+            if (res != LCD_OK) return res;
+        }
+        if (x0 >= a && y0 >= b) {
+            res = LCD_DrawPoint(dev, x0 - a, y0 - b, color);
+            if (res != LCD_OK) return res;
+        }
+        res = LCD_DrawPoint(dev, x0 + b, y0 + a, color);
+        if (res != LCD_OK) return res;
+        if (x0 >= b) {
+            res = LCD_DrawPoint(dev, x0 + a, y0 - b, color);
+            if (res != LCD_OK) return res;
+        }
+        res = LCD_DrawPoint(dev, x0 + a, y0 + b, color);
+        if (res != LCD_OK) return res;
+        if (x0 >= b) {
+            res = LCD_DrawPoint(dev, x0 - b, y0 + a, color);
+            if (res != LCD_OK) return res;
+        }
         a++;
         if (di < 0) {
             di += 4 * a + 6;
@@ -771,7 +802,6 @@ LCD_Result LCD_ShowString(LCD_Device *dev, uint16_t x, uint16_t y, const char *p
     }
 
     uint8_t sizex = sizey / 2U;
-    LCD_Result last_res = LCD_OK;
 
     while (*p != '\0') {
         /* 超出屏幕边界，安全裁剪停止绘制 */
@@ -780,12 +810,12 @@ LCD_Result LCD_ShowString(LCD_Device *dev, uint16_t x, uint16_t y, const char *p
         }
         LCD_Result res = LCD_ShowChar(dev, x, y, (uint8_t)*p, fc, bc, sizey, mode);
         if (res != LCD_OK) {
-            last_res = res;
+            return res; /* 失败立即停止并返回错误 */
         }
         x += sizex;
         p++;
     }
-    return last_res;
+    return LCD_OK;
 }
 
 uint32_t mypow(uint8_t m, uint8_t n)
@@ -807,7 +837,6 @@ LCD_Result LCD_ShowIntNum(LCD_Device *dev, uint16_t x, uint16_t y, uint16_t num,
 
     uint8_t sizex = sizey / 2U;
     uint8_t enshow = 0U;
-    LCD_Result last_res = LCD_OK;
 
     for (uint8_t t = 0U; t < len; t++) {
         if (((uint32_t)x + (uint32_t)t * sizex + sizex) > dev->max_x) {
@@ -817,16 +846,16 @@ LCD_Result LCD_ShowIntNum(LCD_Device *dev, uint16_t x, uint16_t y, uint16_t num,
         if (enshow == 0U && t < (len - 1U)) {
             if (temp == 0U) {
                 LCD_Result r = LCD_ShowChar(dev, x + t * sizex, y, ' ', fc, bc, sizey, 0U);
-                if (r != LCD_OK) last_res = r;
+                if (r != LCD_OK) return r;
                 continue;
             } else {
                 enshow = 1U;
             }
         }
         LCD_Result r = LCD_ShowChar(dev, x + t * sizex, y, temp + '0', fc, bc, sizey, 0U);
-        if (r != LCD_OK) last_res = r;
+        if (r != LCD_OK) return r;
     }
-    return last_res;
+    return LCD_OK;
 }
 
 LCD_Result LCD_ShowFloatNum1(LCD_Device *dev, uint16_t x, uint16_t y, float num, uint8_t len,
@@ -840,10 +869,12 @@ LCD_Result LCD_ShowFloatNum1(LCD_Device *dev, uint16_t x, uint16_t y, float num,
     }
 
     uint8_t sizex = sizey / 2U;
+    LCD_Result res;
 
     if (num < 0.0f) {
         if (((uint32_t)x + sizex) <= dev->max_x) {
-            LCD_ShowChar(dev, x, y, '-', fc, bc, sizey, 0U);
+            res = LCD_ShowChar(dev, x, y, '-', fc, bc, sizey, 0U);
+            if (res != LCD_OK) return res;
         }
         x += sizex;
         num = -num;
@@ -856,13 +887,17 @@ LCD_Result LCD_ShowFloatNum1(LCD_Device *dev, uint16_t x, uint16_t y, float num,
         dec = 0U;
     }
 
-    LCD_ShowIntNum(dev, x, y, (uint16_t)int_part, len, fc, bc, sizey);
+    res = LCD_ShowIntNum(dev, x, y, (uint16_t)int_part, len, fc, bc, sizey);
+    if (res != LCD_OK) return res;
     x += len * sizex;
+
     if (((uint32_t)x + sizex) <= dev->max_x) {
-        LCD_ShowChar(dev, x, y, '.', fc, bc, sizey, 0U);
+        res = LCD_ShowChar(dev, x, y, '.', fc, bc, sizey, 0U);
+        if (res != LCD_OK) return res;
     }
     if (((uint32_t)x + 2U * sizex) <= dev->max_x) {
-        LCD_ShowChar(dev, x + sizex, y, (uint8_t)(dec + '0'), fc, bc, sizey, 0U);
+        res = LCD_ShowChar(dev, x + sizex, y, (uint8_t)(dec + '0'), fc, bc, sizey, 0U);
+        if (res != LCD_OK) return res;
     }
     return LCD_OK;
 }

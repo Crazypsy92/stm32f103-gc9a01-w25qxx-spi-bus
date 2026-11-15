@@ -79,29 +79,36 @@ volatile app_dual_test_result_t g_app_dual_result;
  * @brief GC9A01 全屏流式图案演示：240 行 × 240 像素 (115,200 字节)，
  *        使用 480B 小行缓冲逐行流式生成，验证 MCU 有限内存下的全屏刷屏能力。
  */
-static void AppTFT_StreamPattern(void)
+static LCD_Result AppTFT_StreamPattern(void)
 {
     static uint8_t line_buf[LCD_W * 2];
     static const uint16_t color_table[8] = { RED, GREEN, BLUE, YELLOW, CYAN, MAGENTA, WHITE, DARKBLUE };
-    if (LCD_Address_Set(&g_lcd, 0, 0, LCD_W - 1, LCD_H - 1) != LCD_OK) {
-        return;
+    LCD_Result res = LCD_Address_Set(&g_lcd, 0, 0, LCD_W - 1, LCD_H - 1);
+    if (res != LCD_OK) {
+        return res;
     }
-    if (g_lcd.port->cs(g_lcd.port->ctx, 0) != LCD_OK) {
-        return;
+    res = g_lcd.port->cs(g_lcd.port->ctx, 0);
+    if (res != LCD_OK) {
+        return res;
     }
     g_lcd.port->dc(g_lcd.port->ctx, 1);
+    LCD_Result wr_res = LCD_OK;
     for (uint16_t y = 0; y < LCD_H; y++) {
         uint16_t c = color_table[(y / 30U) % 8U];
         for (uint16_t x = 0; x < LCD_W; x++) {
             line_buf[x * 2U]     = (uint8_t)(c >> 8);
             line_buf[x * 2U + 1] = (uint8_t)(c & 0xFF);
         }
-        if (g_lcd.port->write(g_lcd.port->ctx, line_buf, LCD_W * 2U) != LCD_OK) {
+        wr_res = g_lcd.port->write(g_lcd.port->ctx, line_buf, LCD_W * 2U);
+        if (wr_res != LCD_OK) {
             break;
         }
     }
-    (void)g_lcd.port->cs(g_lcd.port->ctx, 1);
+    LCD_Result rel_res = g_lcd.port->cs(g_lcd.port->ctx, 1);
+    if (wr_res != LCD_OK) return wr_res;
+    if (rel_res != LCD_OK) return rel_res;
     Delay_ms(400);
+    return LCD_OK;
 }
 
 /**
@@ -208,9 +215,13 @@ void AppFlash_Test(void)
             }
 
             /* 步骤 4: TFT 更新局部图形块（交替占用 SPI1） */
-            LCD_Fill(&g_lcd, 24 + (r % 10) * 19, 140 + (r / 10) * 16,
-                            24 + (r % 10) * 19 + 15, 140 + (r / 10) * 16 + 12, GREEN);
-            tft_update_count++;
+            LCD_Result fill_res = LCD_Fill(&g_lcd, 24 + (r % 10) * 19, 140 + (r / 10) * 16,
+                                           24 + (r % 10) * 19 + 15, 140 + (r / 10) * 16 + 12, GREEN);
+            if (fill_res == LCD_OK) {
+                tft_update_count++;
+            } else {
+                break;
+            }
 
             /* 步骤 5: 再次读取 Flash 256B 并校验 */
             memset(rx_256, 0, DUAL_TEST_256);
@@ -230,6 +241,11 @@ void AppFlash_Test(void)
     const void *owner_after = spi_bus_owner(bus);
     uint16_t depth_after = bus->depth;
     uint8_t pass = (rounds_ok == DUAL_TEST_ROUNDS) &&
+                   (id_ok_count == DUAL_TEST_ROUNDS) &&
+                   (dma256_ok_count == DUAL_TEST_ROUNDS) &&
+                   (dma480_ok_count == DUAL_TEST_ROUNDS) &&
+                   (tft_update_count == DUAL_TEST_ROUNDS) &&
+                   (post_read_ok == DUAL_TEST_ROUNDS) &&
                    (owner_after == NULL) &&
                    (depth_after == 0U);
 

@@ -135,4 +135,9 @@ LCD_Result LCD_ShowFloatNum1(LCD_Device *dev, uint16_t x, uint16_t y, float num,
 /* 图片显示（支持分块大长度） */
 LCD_Result LCD_ShowPicture(LCD_Device *dev, uint16_t x, uint16_t y, uint16_t length, uint16_t width, const uint8_t pic[]);
 
+#ifdef HOST_TEST
+/** @brief 内部长数据分块传输辅助接口（仅在单元测试环境下公开用于 65,536 B 等精确边界验证） */
+LCD_Result LCD_Writ_Bytes(LCD_Device *dev, const uint8_t *buf, uint32_t len);
+#endif
+
 #endif /* __GC9A01_H_ */

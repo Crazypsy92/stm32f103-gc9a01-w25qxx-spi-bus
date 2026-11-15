@@ -26,6 +26,7 @@ target_include_directories(test_flash PRIVATE ${STUB_DIR} ${BSP_INC})
 # ---- GC9A01 驱动规范化与可移植测试 (Stage 2.1: 编译真实 gc9a01.c) ----
 add_executable(test_gc9a01 test_gc9a01.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../BSP/Src/gc9a01.c)
+target_compile_definitions(test_gc9a01 PRIVATE HOST_TEST=1)
 target_include_directories(test_gc9a01 PRIVATE ${STUB_DIR} ${BSP_INC})
 
 enable_testing()

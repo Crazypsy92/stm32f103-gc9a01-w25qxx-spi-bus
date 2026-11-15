@@ -43,7 +43,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+volatile LCD_Result g_tft_init_result = LCD_OK;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -106,13 +106,15 @@ int main(void)
   Timebase_Init();
 
   /* 2. GC9A01 TFT 初始化：SPI1（SCK=PA5/MOSI=PA7）、CS=PA9、RES=PA10、DC=PB13 */
-  GC9A01_PortInit();
+  g_tft_init_result = GC9A01_PortInit();
 
   /* 3. W25QXX 初始化：与 TFT 共享 SPI1，CS=PA8，速率 9MHz */
   W25QXX_PortInit();
 
-  /* 4. TFT 上电显示自测 */
-  AppTFT_Test();
+  /* 4. TFT 上电显示自测（仅在 TFT 初始化成功时执行） */
+  if (g_tft_init_result == LCD_OK) {
+    AppTFT_Test();
+  }
 
   /* 5. 共享总线测试：Flash 识别与非破坏性读校验（默认零擦除安全模式），结果显示在 TFT 上 */
   AppFlash_Test();

@@ -16,8 +16,9 @@ extern LCD_Device g_lcd;
 
 /**
  * @brief 初始化 SPI1 总线、控制引脚并完成 GC9A01 初始化
+ * @return LCD_OK 成功；其他为初始化失败错误码
  * @note  需在 Timebase_Init() 之后调用
  */
-void GC9A01_PortInit(void);
+LCD_Result GC9A01_PortInit(void);
 
 #endif /* __GC9A01_PORT_H__ */
